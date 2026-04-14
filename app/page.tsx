@@ -24,6 +24,35 @@ function VerificationContent() {
   const scannerRef = useRef<Html5Qrcode | null>(null);
   const isStartingRef = useRef<boolean>(false);
 
+  // --- Logic: Touch to Focus ---
+  const handleTouchToFocus = async () => {
+    const video = document.querySelector("#reader video") as HTMLVideoElement;
+    if (!video || !video.srcObject) return;
+
+    const track = (video.srcObject as MediaStream).getVideoTracks()[0];
+    const capabilities = track.getCapabilities() as any;
+
+    if (capabilities.focusMode) {
+      try {
+        // We toggle focus mode to trigger a re-focus event on tap
+        await track.applyConstraints({
+          advanced: [{ focusMode: capabilities.focusMode.includes('manual') ? 'manual' : 'continuous' }]
+        } as any);
+        
+        // Return to continuous after a brief moment if supported
+        if (capabilities.focusMode.includes('continuous')) {
+          setTimeout(async () => {
+            await track.applyConstraints({
+              advanced: [{ focusMode: 'continuous' }]
+            } as any);
+          }, 500);
+        }
+      } catch (e) {
+        console.warn("Manual focus not supported on this device/browser.", e);
+      }
+    }
+  };
+
   // --- Logic: Auto-Detect OCR Loop ---
   useEffect(() => {
     let worker: any = null;
@@ -43,7 +72,6 @@ function VerificationContent() {
           if (!video || video.paused || video.ended) return;
 
           const canvas = document.createElement("canvas");
-          // To speed up OCR, we use a slightly lower resolution for the canvas
           canvas.width = video.videoWidth;
           canvas.height = video.videoHeight;
           const ctx = canvas.getContext("2d");
@@ -51,8 +79,6 @@ function VerificationContent() {
 
           try {
             const { data: { text } } = await worker.recognize(canvas);
-            
-            // STRICT REGEX: Specifically looks for CAS-XX-0000 format
             const strictMatch = text.match(/CAS-[A-Z0-9]{1,3}-[0-9]{1,5}/i);
             
             if (strictMatch && isMounted) {
@@ -66,7 +92,6 @@ function VerificationContent() {
           }
         };
 
-        // 1100ms interval for fast but stable detection
         intervalId = setInterval(processFrame, 1100);
       } catch (err) {
         console.error("OCR Worker failed:", err);
@@ -82,7 +107,7 @@ function VerificationContent() {
     };
   }, [isOCRMode, showScanner]);
 
-  // --- Logic: Camera Focus & Start ---
+  // --- Logic: Camera Start ---
   useEffect(() => {
     let isMounted = true;
     let timer: NodeJS.Timeout;
@@ -103,11 +128,9 @@ function VerificationContent() {
                 fps: 25, 
                 qrbox: { width: 250, height: 250 }, 
                 aspectRatio: 1.0,
-                // Advanced constraints for better focus
                 videoConstraints: {
                     facingMode: "environment",
-                    focusMode: "continuous",
-                    whiteBalanceMode: "continuous"
+                    focusMode: "continuous"
                 } as any
               },
               (text) => {
@@ -119,19 +142,6 @@ function VerificationContent() {
               },
               () => {}
             );
-
-            // Manual Focus Trigger (For Android/Chrome Support)
-            const video = readerElement.querySelector("video");
-            if (video && video.srcObject) {
-                const track = (video.srcObject as MediaStream).getVideoTracks()[0];
-                const capabilities = track.getCapabilities() as any;
-                if (capabilities.focusMode && capabilities.focusMode.includes('continuous')) {
-                    await track.applyConstraints({
-                        advanced: [{ focusMode: 'continuous' }]
-                    } as any);
-                }
-            }
-
           } catch (err) {
             console.error("Camera failed to start:", err);
           } finally {
@@ -156,7 +166,7 @@ function VerificationContent() {
     };
   }, [showScanner, isOCRMode]);
 
-  // --- Remaining Logic ---
+  // --- Logic Helpers ---
   useEffect(() => {
     const handlePopState = () => {
       const params = new URLSearchParams(window.location.search);
@@ -243,7 +253,7 @@ function VerificationContent() {
   return (
     <div className="min-h-screen bg-white text-[#1a1c1e] p-4 md:p-8">
       <style>{`
-        #reader video { width: 100% !important; height: 100% !important; object-fit: cover !important; border-radius: 32px; }
+        #reader video { width: 100% !important; height: 100% !important; object-fit: cover !important; border-radius: 32px; cursor: crosshair; }
         #reader { border: none !important; }
         @keyframes scan { 0% { top: 0; } 100% { top: 100%; } }
         .animate-laser { animation: scan 2s linear infinite; }
@@ -316,7 +326,11 @@ function VerificationContent() {
             </div>
 
             <div className="flex-1 flex flex-col items-center justify-center p-6 bg-[#f0f4f9]">
-              <div className="w-full max-w-sm bg-white p-2 rounded-[40px] shadow-sm border border-[#d3e3fd]">
+              {/* Added handleTouchToFocus to the container click event */}
+              <div 
+                onClick={handleTouchToFocus} 
+                className="w-full max-w-sm bg-white p-2 rounded-[40px] shadow-sm border border-[#d3e3fd] cursor-pointer active:scale-[0.98] transition-transform"
+              >
                 <div className="relative aspect-square overflow-hidden rounded-[32px] bg-black">
                   <div id="reader" className="w-full h-full"></div>
                   <div className="absolute inset-0 border-[40px] border-black/40 pointer-events-none z-10"></div>
@@ -326,6 +340,9 @@ function VerificationContent() {
                       <span className="bg-blue-600 text-white text-[10px] px-3 py-1 rounded-full font-bold tracking-widest animate-bounce uppercase">Auto-Detecting Item Code</span>
                     </div>
                   )}
+                  <div className="absolute bottom-4 left-0 w-full text-center z-30 opacity-50">
+                      <span className="text-white text-[9px] font-medium">TAP PREVIEW TO FOCUS</span>
+                  </div>
                 </div>
               </div>
               <p className="mt-8 text-[#44474e] text-sm text-center bg-white/50 px-6 py-2 rounded-full font-medium">
@@ -442,7 +459,7 @@ function VerificationContent() {
 
       {isInvalidModalOpen && (
         <div className="fixed inset-0 bg-black/30 backdrop-blur-sm flex items-center justify-center p-6 z-[200]">
-          <div className="bg-white rounded-[28px] p-8 w-full max-sm text-center shadow-xl border border-[#e0e2ec]">
+          <div className="bg-white rounded-[28px] p-8 w-full max-w-sm text-center shadow-xl border border-[#e0e2ec]">
             <h2 className="text-xl font-medium mb-2">Record not found</h2>
             <p className="text-[#44474e] text-sm mb-8">The code provided doesn't match any registered equipment.</p>
             <button onClick={() => setIsInvalidModalOpen(false)} className="w-full bg-[#005fb7] text-white py-3 rounded-full font-bold text-sm cursor-pointer transition-colors hover:bg-[#004a8f]">Try again</button>
