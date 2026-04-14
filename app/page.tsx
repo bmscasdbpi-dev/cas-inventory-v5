@@ -50,11 +50,13 @@ function VerificationContent() {
 
           try {
             const { data: { text } } = await worker.recognize(canvas);
-            // Specifically matches CAS-XX-0000 format or similar alphanumeric strings
-            const match = text.match(/CAS-[A-Z0-9]+-[0-9]+/i) || text.match(/[A-Z0-9-]{5,}/);
             
-            if (match && isMounted) {
-              const code = match[0].toUpperCase();
+            // STRICT REGEX: Matches CAS-XX-0000 format specifically
+            // Matches 'CAS', a dash, 1-3 letters/numbers, a dash, and 1-5 numbers
+            const strictMatch = text.match(/CAS-[A-Z0-9]{1,3}-[0-9]{1,5}/i);
+            
+            if (strictMatch && isMounted) {
+              const code = strictMatch[0].toUpperCase();
               setSearchCode(code);
               handleSearch(code);
               setShowScanner(false);
@@ -64,8 +66,8 @@ function VerificationContent() {
           }
         };
 
-        // Run detection every 1.5 seconds to balance speed and battery
-        intervalId = setInterval(processFrame, 1500);
+        // Faster detection interval for "instant" feel
+        intervalId = setInterval(processFrame, 1200);
       } catch (err) {
         console.error("OCR Worker failed:", err);
       }
@@ -117,67 +119,57 @@ function VerificationContent() {
     return finalCode;
   };
 
-// --- Logic: Camera Scanner ---
-useEffect(() => {
-  let isMounted = true;
-  let timer: NodeJS.Timeout;
+  // --- Logic: Camera Scanner ---
+  useEffect(() => {
+    let isMounted = true;
+    let timer: NodeJS.Timeout;
 
-  const startCamera = async () => {
-    // 1. Give the modal/animation time to actually put the #reader in the DOM
-    timer = setTimeout(async () => {
-      const readerElement = document.getElementById("reader");
-      
-      if (showScanner && isMounted && readerElement && !isStartingRef.current) {
-        try {
-          // Double-check if already running
-          if (scannerRef.current && scannerRef.current.isScanning) return;
+    const startCamera = async () => {
+      timer = setTimeout(async () => {
+        const readerElement = document.getElementById("reader");
+        if (showScanner && isMounted && readerElement && !isStartingRef.current) {
+          try {
+            if (scannerRef.current && scannerRef.current.isScanning) return;
+            isStartingRef.current = true;
+            const html5QrCode = new Html5Qrcode("reader");
+            scannerRef.current = html5QrCode;
 
-          isStartingRef.current = true;
-          const html5QrCode = new Html5Qrcode("reader");
-          scannerRef.current = html5QrCode;
-
-          await html5QrCode.start(
-            { facingMode: "environment" },
-            { 
-              fps: 20, 
-              qrbox: { width: 250, height: 250 }, 
-              aspectRatio: 1.0 
-            },
-            (text) => {
-              if (isOCRMode) return;
-              const code = processScannedText(text);
-              setSearchCode(code);
-              handleSearch(code);
-              setShowScanner(false);
-            },
-            () => {}
-          );
-        } catch (err) {
-          console.error("Camera failed to start:", err);
-        } finally {
-          isStartingRef.current = false;
+            await html5QrCode.start(
+              { facingMode: "environment" },
+              { fps: 20, qrbox: { width: 250, height: 250 }, aspectRatio: 1.0 },
+              (text) => {
+                if (isOCRMode) return;
+                const code = processScannedText(text);
+                setSearchCode(code);
+                handleSearch(code);
+                setShowScanner(false);
+              },
+              () => {}
+            );
+          } catch (err) {
+            console.error("Camera failed to start:", err);
+          } finally {
+            isStartingRef.current = false;
+          }
         }
+      }, 350);
+    };
+
+    startCamera();
+
+    return () => {
+      isMounted = false;
+      if (timer) clearTimeout(timer);
+      if (scannerRef.current && scannerRef.current.isScanning) {
+        scannerRef.current.stop().then(() => {
+          if (document.getElementById("reader")) {
+            scannerRef.current?.clear();
+          }
+        }).catch(e => console.warn("Stop failed:", e));
       }
-    }, 300); // 300ms delay to wait for React to finish the conditional render
-  };
+    };
+  }, [showScanner, isOCRMode]);
 
-  startCamera();
-
-  return () => {
-    isMounted = false;
-    if (timer) clearTimeout(timer); // Clear the timeout if we close quickly
-    if (scannerRef.current && scannerRef.current.isScanning) {
-      scannerRef.current.stop().then(() => {
-        if (document.getElementById("reader")) {
-          scannerRef.current?.clear();
-        }
-      }).catch(e => console.warn("Clean stop failed:", e));
-    }
-  };
-}, [showScanner, isOCRMode]);
-
-
-  // --- Logic: Image Upload Scan ---
   const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -196,7 +188,6 @@ useEffect(() => {
     }
   };
 
-  // --- Logic: Database Search ---
   async function handleSearch(codeToSearch?: string) {
     const code = codeToSearch || searchCode;
     if (!code) return;
@@ -236,9 +227,6 @@ useEffect(() => {
         .animate-laser { animation: scan 2s linear infinite; }
       `}</style>
 
-
-{/* --- View 1: Search Home --- */}
-
       <div className="max-w-6xl mx-auto">
         <div id="hidden-reader" className="hidden"></div>
 
@@ -258,7 +246,7 @@ useEffect(() => {
                 <button 
                   onClick={() => handleSearch()}
                   disabled={loading || !searchCode}
-                  className="w-full bg-[#0080ff] text-white py-3.5 rounded-full font-bold h-[48px] disabled:opacity-40"
+                  className="w-full bg-[#0080ff] text-white py-3.5 rounded-full font-bold h-[48px] disabled:opacity-40 cursor-pointer"
                 >
                   {loading ? "Verifying..." : "Verify Item"}
                 </button>
@@ -267,93 +255,65 @@ useEffect(() => {
                   <span className="text-xs font-bold text-[#74777f]">or</span>
                   <div className="h-px bg-[#e0e2ec] flex-1"></div>
                 </div>
-<div className="grid grid-cols-2 gap-4">
-  <button 
-    onClick={() => { 
-      setIsOCRMode(true); // Force OCR mode when opening
-      setShowScanner(true); 
-    }} 
-    className="bg-[#f0f4f9] py-3.5 rounded-xl font-bold text-sm flex items-center justify-center gap-2 transition-colors hover:bg-[#d3e3fd] cursor-pointer"
-  >
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
-    Scan Code
-  </button>
-  
-  <button 
-    onClick={() => fileInputRef.current?.click()} 
-    className="bg-[#f0f4f9] py-3.5 rounded-xl font-bold text-sm flex items-center justify-center gap-2 transition-colors hover:bg-[#d3e3fd] cursor-pointer"
-  >
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-    Upload Image
-  </button>
-  <input type="file" ref={fileInputRef} onChange={handleImageUpload} accept="image/*" className="hidden" />
-</div>
+                <div className="grid grid-cols-2 gap-4">
+                  <button 
+                    onClick={() => { setIsOCRMode(true); setShowScanner(true); }} 
+                    className="bg-[#f0f4f9] py-3.5 rounded-xl font-bold text-sm flex items-center justify-center gap-2 transition-colors hover:bg-[#d3e3fd] cursor-pointer"
+                  >
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+                    Scan Code
+                  </button>
+                  <button onClick={() => fileInputRef.current?.click()} className="bg-[#f0f4f9] py-3.5 rounded-xl font-bold text-sm flex items-center justify-center gap-2 transition-colors hover:bg-[#d3e3fd] cursor-pointer">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                    Upload Image
+                  </button>
+                  <input type="file" ref={fileInputRef} onChange={handleImageUpload} accept="image/*" className="hidden" />
+                </div>
               </div>
             </div>
           </div>
         )}
 
-{/* --- View 2: QR and OCR Scanner --- */}
-{showScanner && (
-  <div className="fixed inset-0 bg-white z-[100] flex flex-col animate-in slide-in-from-bottom-8 duration-500">
-    <div className="p-4 flex items-center justify-between border-b border-[#e0e2ec]">
-      <button onClick={() => setShowScanner(false)} className="p-2 rounded-full hover:bg-[#f0f4f9]">
-        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#44474e" strokeWidth="2"><path d="M19 12H5m7 7l-7-7 7-7"/></svg>
-      </button>
-      
-      {/* Mode Switcher - OCR is now the first/primary option */}
-      <div className="flex bg-[#f0f4f9] p-1 rounded-full border border-[#e0e2ec]">
-        <button 
-          onClick={() => setIsOCRMode(true)}
-          className={`px-4 py-1.5 rounded-full text-xs font-bold transition-all cursor-pointer ${isOCRMode ? 'bg-[#0080ff] text-white shadow-sm' : 'text-[#44474e]'}`}
-        >
-          OCR Mode
-        </button>
-        <button 
-          onClick={() => setIsOCRMode(false)}
-          className={`px-4 py-1.5 rounded-full text-xs font-bold transition-all cursor-pointer ${!isOCRMode ? 'bg-[#0080ff] text-white shadow-sm' : 'text-[#44474e]'}`}
-        >
-          QR Mode
-        </button>
-      </div>
-      <div className="w-10"></div>
-    </div>
-
-    <div className="flex-1 flex flex-col items-center justify-center p-6 bg-[#f0f4f9]">
-      <div className="w-full max-w-sm bg-white p-2 rounded-[40px] shadow-sm border border-[#d3e3fd]">
-        <div className="relative aspect-square overflow-hidden rounded-[32px] bg-black">
-          <div id="reader" className="w-full h-full"></div>
-          
-          {/* UI Overlay Frame */}
-          <div className="absolute inset-0 border-[40px] border-black/40 pointer-events-none z-10"></div>
-          
-          {/* Visual Indicator: Blue pulse for OCR, White laser for QR */}
-          <div className={`absolute top-0 left-0 w-full h-1 z-20 transition-all duration-500 ${isOCRMode ? 'animate-pulse h-full bg-blue-500/10 shadow-[inset_0_0_20px_rgba(59,130,246,0.3)]' : 'animate-laser bg-white/60 shadow-lg'}`}></div>
-          
-          {/* Status Label for OCR */}
-          {isOCRMode && (
-            <div className="absolute top-4 left-0 w-full text-center z-30">
-              <span className="bg-blue-600 text-white text-[10px] px-3 py-1 rounded-full font-bold tracking-widest animate-bounce">
-                AUTO-DETECTING CAS CODE
-              </span>
+        {showScanner && (
+          <div className="fixed inset-0 bg-white z-[100] flex flex-col animate-in slide-in-from-bottom-8 duration-500">
+            <div className="p-4 flex items-center justify-between border-b border-[#e0e2ec]">
+              <button onClick={() => setShowScanner(false)} className="p-2 rounded-full hover:bg-[#f0f4f9] cursor-pointer">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#44474e" strokeWidth="2"><path d="M19 12H5m7 7l-7-7 7-7"/></svg>
+              </button>
+              <div className="flex bg-[#f0f4f9] p-1 rounded-full border border-[#e0e2ec]">
+                <button 
+                  onClick={() => setIsOCRMode(true)}
+                  className={`px-4 py-1.5 rounded-full text-xs font-bold transition-all cursor-pointer ${isOCRMode ? 'bg-[#0080ff] text-white shadow-sm' : 'text-[#44474e]'}`}
+                >OCR Mode</button>
+                <button 
+                  onClick={() => setIsOCRMode(false)}
+                  className={`px-4 py-1.5 rounded-full text-xs font-bold transition-all cursor-pointer ${!isOCRMode ? 'bg-[#0080ff] text-white shadow-sm' : 'text-[#44474e]'}`}
+                >QR Mode</button>
+              </div>
+              <div className="w-10"></div>
             </div>
-          )}
-        </div>
-      </div>
 
-      <p className="mt-8 text-[#44474e] text-sm text-center bg-white/50 px-6 py-2 rounded-full font-medium">
-        {isOCRMode ? "Align the CAS-XX-0000 code in the frame" : "Center the QR code in the frame"}
-      </p>
-      
-      <button 
-        onClick={() => setShowScanner(false)} 
-        className="mt-6 px-8 py-3 bg-white text-[#0080ff] border border-[#0080ff] rounded-full text-sm font-bold active:scale-95 transition-transform cursor-pointer"
-      >
-        Close Scanner
-      </button>
-    </div>
-  </div>
-)}
+            <div className="flex-1 flex flex-col items-center justify-center p-6 bg-[#f0f4f9]">
+              <div className="w-full max-w-sm bg-white p-2 rounded-[40px] shadow-sm border border-[#d3e3fd]">
+                <div className="relative aspect-square overflow-hidden rounded-[32px] bg-black">
+                  <div id="reader" className="w-full h-full"></div>
+                  <div className="absolute inset-0 border-[40px] border-black/40 pointer-events-none z-10"></div>
+                  <div className={`absolute top-0 left-0 w-full h-1 z-20 transition-all duration-500 ${isOCRMode ? 'animate-pulse h-full bg-blue-500/10 shadow-[inset_0_0_20px_rgba(59,130,246,0.3)]' : 'animate-laser bg-white/60 shadow-lg'}`}></div>
+                  {isOCRMode && (
+                    <div className="absolute top-4 left-0 w-full text-center z-30">
+                      <span className="bg-blue-600 text-white text-[10px] px-3 py-1 rounded-full font-bold tracking-widest animate-bounce">AUTO-DETECTING CAS CODE</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+              <p className="mt-8 text-[#44474e] text-sm text-center bg-white/50 px-6 py-2 rounded-full font-medium">
+                {isOCRMode ? "Align the CAS-XX-0000 code in the frame" : "Center the QR code in the frame"}
+              </p>
+              <button onClick={() => setShowScanner(false)} className="mt-6 px-8 py-3 bg-white text-[#0080ff] border border-[#0080ff] rounded-full text-sm font-bold active:scale-95 cursor-pointer">Close Scanner</button>
+            </div>
+          </div>
+        )}
+
 
 
 {/* --- View 3: Verified Details --- */}
@@ -464,7 +424,7 @@ useEffect(() => {
           <div className="bg-white rounded-[28px] p-8 w-full max-w-sm text-center shadow-xl border border-[#e0e2ec]">
             <h2 className="text-xl font-medium mb-2">Record not found</h2>
             <p className="text-[#44474e] text-sm mb-8">The code provided doesn't match any registered equipment.</p>
-            <button onClick={() => setIsInvalidModalOpen(false)} className="w-full bg-[#005fb7] text-white py-3 rounded-full font-bold text-sm">Try again</button>
+            <button onClick={() => setIsInvalidModalOpen(false)} className="w-full bg-[#005fb7] text-white py-3 rounded-full font-bold text-sm cursor-pointer">Try again</button>
           </div>
         </div>
       )}
