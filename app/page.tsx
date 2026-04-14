@@ -51,8 +51,8 @@ function VerificationContent() {
           try {
             const { data: { text } } = await worker.recognize(canvas);
             
-            // STRICT REGEX: Matches CAS-XX-0000 format specifically
-            // Matches 'CAS', a dash, 1-3 letters/numbers, a dash, and 1-5 numbers
+            // STRICT REGEX: Specifically looks for CAS-XX-0000 or CAS-X-00000 formats
+            // Disregards other text noise in the frame
             const strictMatch = text.match(/CAS-[A-Z0-9]{1,3}-[0-9]{1,5}/i);
             
             if (strictMatch && isMounted) {
@@ -66,8 +66,8 @@ function VerificationContent() {
           }
         };
 
-        // Faster detection interval for "instant" feel
-        intervalId = setInterval(processFrame, 1200);
+        // 1100ms check for faster detection while maintaining battery stability
+        intervalId = setInterval(processFrame, 1100);
       } catch (err) {
         console.error("OCR Worker failed:", err);
       }
@@ -241,12 +241,12 @@ function VerificationContent() {
                     onChange={(e) => setSearchCode(e.target.value)}
                     onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
                     placeholder="Enter item code" 
-                    className="w-full border border-[#74777f] p-4 rounded-xl text-center font-bold uppercase outline-none focus:border-[#005fb7] focus:border-2"
+                    className="w-full border border-[#74777f] p-4 rounded-xl text-center font-bold uppercase outline-none focus:border-[#005fb7] focus:border-2 cursor-text"
                 />
                 <button 
                   onClick={() => handleSearch()}
                   disabled={loading || !searchCode}
-                  className="w-full bg-[#0080ff] text-white py-3.5 rounded-full font-bold h-[48px] disabled:opacity-40 cursor-pointer"
+                  className="w-full bg-[#0080ff] text-white py-3.5 rounded-full font-bold h-[48px] disabled:opacity-40 cursor-pointer transition-shadow hover:shadow-md"
                 >
                   {loading ? "Verifying..." : "Verify Item"}
                 </button>
@@ -298,7 +298,7 @@ function VerificationContent() {
                 <div className="relative aspect-square overflow-hidden rounded-[32px] bg-black">
                   <div id="reader" className="w-full h-full"></div>
                   <div className="absolute inset-0 border-[40px] border-black/40 pointer-events-none z-10"></div>
-                  <div className={`absolute top-0 left-0 w-full h-1 z-20 transition-all duration-500 ${isOCRMode ? 'animate-pulse h-full bg-blue-500/10 shadow-[inset_0_0_20px_rgba(59,130,246,0.3)]' : 'animate-laser bg-white/60 shadow-lg'}`}></div>
+                  <div className={`absolute top-0 left-0 w-full h-1 z-20 transition-all duration-500 ${isOCRMode ? 'animate-pulse h-full bg-blue-500/5 shadow-[inset_0_0_20px_rgba(59,130,246,0.2)]' : 'animate-laser bg-white/60 shadow-lg'}`}></div>
                   {isOCRMode && (
                     <div className="absolute top-4 left-0 w-full text-center z-30">
                       <span className="bg-blue-600 text-white text-[10px] px-3 py-1 rounded-full font-bold tracking-widest animate-bounce">AUTO-DETECTING CAS CODE</span>
@@ -314,8 +314,7 @@ function VerificationContent() {
           </div>
         )}
 
-
-
+       
 {/* --- View 3: Verified Details --- */}
         {selectedItem && (
           <div className="animate-in fade-in slide-in-from-bottom-4 duration-700">
@@ -424,7 +423,7 @@ function VerificationContent() {
           <div className="bg-white rounded-[28px] p-8 w-full max-w-sm text-center shadow-xl border border-[#e0e2ec]">
             <h2 className="text-xl font-medium mb-2">Record not found</h2>
             <p className="text-[#44474e] text-sm mb-8">The code provided doesn't match any registered equipment.</p>
-            <button onClick={() => setIsInvalidModalOpen(false)} className="w-full bg-[#005fb7] text-white py-3 rounded-full font-bold text-sm cursor-pointer">Try again</button>
+            <button onClick={() => setIsInvalidModalOpen(false)} className="w-full bg-[#005fb7] text-white py-3 rounded-full font-bold text-sm cursor-pointer transition-colors hover:bg-[#004a8f]">Try again</button>
           </div>
         </div>
       )}
