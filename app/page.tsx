@@ -25,6 +25,29 @@ function VerificationContent() {
   const isStartingRef = useRef<boolean>(false);
   const tesseractWorkerRef = useRef<any>(null);
 
+  // --- Logic: Tap to Focus Trigger ---
+  const focusCamera = async () => {
+    if (scannerRef.current?.isScanning) {
+      try {
+        const track = (scannerRef.current as any).getRunningTrack 
+                      ? (scannerRef.current as any).getRunningTrack() 
+                      : null;
+
+        if (track && track.getCapabilities) {
+          const capabilities = track.getCapabilities();
+          // Re-applying continuous focus forces the lens to recalibrate
+          if (capabilities.focusMode?.includes("continuous")) {
+            await track.applyConstraints({
+              advanced: [{ focusMode: "continuous" }]
+            } as any);
+          }
+        }
+      } catch (err) {
+        console.warn("Manual focus kick failed:", err);
+      }
+    }
+  };
+
   // --- Logic: Optimized OCR Engine ---
   useEffect(() => {
     let intervalId: NodeJS.Timeout;
@@ -43,16 +66,15 @@ function VerificationContent() {
       const video = document.querySelector("#reader video") as HTMLVideoElement;
       if (!video || video.readyState < 2) return;
 
-      // Logic: Extract a high-contrast crop for small text detection
       const canvas = document.createElement("canvas");
       const ctx = canvas.getContext("2d");
       if (!ctx) return;
 
-      // Upscale frame slightly to help OCR see small characters
+      // Upscale for small text clarity
       canvas.width = video.videoWidth * 1.2;
       canvas.height = video.videoHeight * 1.2;
       
-      // Apply Grayscale and Contrast Filter
+      // Grayscale + Contrast boost for better AI recognition
       ctx.filter = "grayscale(1) contrast(1.2)";
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
@@ -73,7 +95,7 @@ function VerificationContent() {
 
     if (showScanner && isOCRMode) {
       initWorker().then(() => {
-        intervalId = setInterval(processFrame, 800); // Faster polling
+        intervalId = setInterval(processFrame, 800);
       });
     }
 
@@ -83,7 +105,6 @@ function VerificationContent() {
     };
   }, [isOCRMode, showScanner]);
 
-  // Cleanup worker on unmount
   useEffect(() => {
     return () => {
       if (tesseractWorkerRef.current) {
@@ -93,7 +114,7 @@ function VerificationContent() {
     };
   }, []);
 
-  // --- Logic: Handle Browser Navigation ---
+  // --- Logic: Navigation & Scanned Text Processing ---
   useEffect(() => {
     const handlePopState = () => {
       const params = new URLSearchParams(window.location.search);
@@ -127,91 +148,78 @@ function VerificationContent() {
     return finalCode;
   };
 
-  // --- Logic: High-Performance Camera Scanner ---
-  // --- Logic: High-Performance Camera Scanner ---
-useEffect(() => {
-  let isMounted = true;
-  let timer: NodeJS.Timeout;
+  // --- Logic: High-Performance Camera Scanner & Smart Zoom ---
+  useEffect(() => {
+    let isMounted = true;
+    let timer: NodeJS.Timeout;
 
-  const startCamera = async () => {
-    timer = setTimeout(async () => {
-      const readerElement = document.getElementById("reader");
-      if (showScanner && isMounted && readerElement && !isStartingRef.current) {
-        try {
-          if (scannerRef.current?.isScanning) return;
-          isStartingRef.current = true;
-          
-          const html5QrCode = new Html5Qrcode("reader");
-          scannerRef.current = html5QrCode;
+    const startCamera = async () => {
+      timer = setTimeout(async () => {
+        const readerElement = document.getElementById("reader");
+        if (showScanner && isMounted && readerElement && !isStartingRef.current) {
+          try {
+            if (scannerRef.current?.isScanning) return;
+            isStartingRef.current = true;
+            
+            const html5QrCode = new Html5Qrcode("reader");
+            scannerRef.current = html5QrCode;
 
-          const config = {
-            fps: 30, 
-            qrbox: (viewWidth: number, viewHeight: number) => {
-              const size = Math.min(viewWidth, viewHeight) * 0.7;
-              return { width: size, height: size };
-            },
-            aspectRatio: 1.0,
-            formatsToSupport: [ Html5QrcodeSupportedFormats.QR_CODE ]
-          };
+            const config = {
+              fps: 30, 
+              qrbox: (viewWidth: number, viewHeight: number) => {
+                const size = Math.min(viewWidth, viewHeight) * 0.7;
+                return { width: size, height: size };
+              },
+              aspectRatio: 1.0,
+              formatsToSupport: [ Html5QrcodeSupportedFormats.QR_CODE ]
+            };
 
-          await html5QrCode.start(
-            { facingMode: "environment" },
-            config,
-            (text) => {
-              if (isOCRMode) return;
-              const code = processScannedText(text);
-              setSearchCode(code);
-              handleSearch(code);
-              setShowScanner(false);
-            },
-            () => {} 
-          );
+            await html5QrCode.start(
+              { facingMode: "environment" },
+              config,
+              (text) => {
+                if (isOCRMode) return;
+                const code = processScannedText(text);
+                setSearchCode(code);
+                handleSearch(code);
+                setShowScanner(false);
+              },
+              () => {} 
+            );
 
-          // --- SMART FIX FOR getRunningTrack ---
-          // Access the track via the scanner instance safely
-          const scanner = scannerRef.current;
-          if (scanner) {
-            // Some versions use getRunningTrack() on the instance, 
-            // others require accessing the underlying media stream
-            const track = (scanner as any).getRunningTrack ? 
-                          (scanner as any).getRunningTrack() : 
-                          null;
-
-            if (track && track.getCapabilities) {
-              const capabilities = track.getCapabilities();
-              // Check if zoom is supported by the hardware
-              if (capabilities.zoom) {
-                await track.applyConstraints({
-                  advanced: [
-                    { 
-                      zoom: capabilities.zoom.min + 1, // Slight zoom to help with small codes
-                      focusMode: "continuous" 
-                    }
-                  ]
-                });
+            // Access track for zoom/focus capabilities safely
+            const scanner = scannerRef.current;
+            if (scanner) {
+              const track = (scanner as any).getRunningTrack ? (scanner as any).getRunningTrack() : null;
+              if (track && track.getCapabilities) {
+                const caps = track.getCapabilities();
+                if (caps.zoom) {
+                  await track.applyConstraints({
+                    advanced: [{ zoom: caps.zoom.min + 1, focusMode: "continuous" }]
+                  } as any);
+                }
               }
             }
+
+          } catch (err) {
+            console.error("Camera Init Error:", err);
+          } finally {
+            isStartingRef.current = false;
           }
-
-        } catch (err) {
-          console.error("Camera Init Error:", err);
-        } finally {
-          isStartingRef.current = false;
         }
+      }, 300);
+    };
+
+    startCamera();
+
+    return () => {
+      isMounted = false;
+      if (timer) clearTimeout(timer);
+      if (scannerRef.current?.isScanning) {
+        scannerRef.current.stop().catch(e => console.warn("Cleanup error:", e));
       }
-    }, 300);
-  };
-
-  startCamera();
-
-  return () => {
-    isMounted = false;
-    if (timer) clearTimeout(timer);
-    if (scannerRef.current?.isScanning) {
-      scannerRef.current.stop().catch(e => console.warn("Cleanup error:", e));
-    }
-  };
-}, [showScanner, isOCRMode]);
+    };
+  }, [showScanner, isOCRMode]);
 
   const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -339,9 +347,7 @@ useEffect(() => {
             <div className="flex-1 flex flex-col items-center justify-center p-6 bg-[#f0f4f9]">
               <div className="w-full max-w-sm bg-white p-2 rounded-[40px] shadow-sm border border-[#d3e3fd]">
                 <div className="relative aspect-square overflow-hidden rounded-[32px] bg-black">
-                  <div id="reader" className="w-full h-full"></div>
-                  
-                  {/* Visual Overlay */}
+                  <div id="reader" className="w-full h-full cursor-crosshair" onClick={focusCamera}></div>
                   <div className="absolute inset-0 border-[40px] border-black/40 pointer-events-none z-10"></div>
                   <div className="scanner-laser"></div>
                   
@@ -353,7 +359,7 @@ useEffect(() => {
                 </div>
               </div>
               <p className="mt-8 text-[#44474e] text-sm text-center bg-white/50 px-6 py-2 rounded-full font-medium">
-                {isOCRMode ? "Align the CAS code inside the square" : "Position the QR code inside the square"}
+                {isOCRMode ? "Tap to focus • Align CAS code" : "Tap to focus • Center QR code"}
               </p>
               <button onClick={() => setShowScanner(false)} className="mt-6 px-8 py-3 bg-white text-[#0080ff] border border-[#0080ff] rounded-full text-sm font-bold active:scale-95">Close Scanner</button>
             </div>
