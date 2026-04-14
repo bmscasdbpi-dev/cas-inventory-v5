@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { getItemByCode } from "../actions/itemActions"; 
-import { Html5Qrcode } from "html5-qrcode";
+import { Html5Qrcode, Html5QrcodeSupportedFormats } from "html5-qrcode";
 import { createWorker } from 'tesseract.js';
 
 function VerificationContent() {
@@ -20,197 +20,215 @@ function VerificationContent() {
   const [isParsingImage, setIsParsingImage] = useState<boolean>(false);
   const [isOCRMode, setIsOCRMode] = useState<boolean>(true);
   
-  // Camera Selection States
-  const [cameras, setCameras] = useState<any[]>([]);
-  const [selectedCameraId, setSelectedCameraId] = useState<string>("");
-
   const fileInputRef = useRef<HTMLInputElement>(null);
   const scannerRef = useRef<Html5Qrcode | null>(null);
   const isStartingRef = useRef<boolean>(false);
+  const tesseractWorkerRef = useRef<any>(null);
 
-  // --- Logic: Fetch Cameras ---
+  // --- Logic: Optimized OCR Engine ---
   useEffect(() => {
-    if (showScanner) {
-      Html5Qrcode.getCameras().then(devices => {
-        if (devices && devices.length > 0) {
-          setCameras(devices);
-          // Prioritize back/rear camera for accuracy
-          const backCam = devices.find(d => 
-            d.label.toLowerCase().includes("back") || 
-            d.label.toLowerCase().includes("rear") ||
-            d.label.toLowerCase().includes("environment")
-          );
-          setSelectedCameraId(backCam ? backCam.id : devices[0].id);
-        }
-      }).catch(err => console.error("Camera fetch error", err));
-    }
-  }, [showScanner]);
-
-  // --- Logic: Auto-Detect OCR Loop ---
-  useEffect(() => {
-    let worker: any = null;
     let intervalId: NodeJS.Timeout;
     let isMounted = true;
 
-    const startOCRProcess = async () => {
-      if (!isOCRMode || !showScanner || !selectedCameraId) return;
-
-      try {
-        worker = await createWorker('eng');
-        const processFrame = async () => {
-          if (!isMounted || !isOCRMode) return;
-          const video = document.querySelector("#reader video") as HTMLVideoElement;
-          if (!video || video.paused || video.ended) return;
-
-          const canvas = document.createElement("canvas");
-          canvas.width = video.videoWidth;
-          canvas.height = video.videoHeight;
-          const ctx = canvas.getContext("2d");
-          ctx?.drawImage(video, 0, 0);
-
-          try {
-            const { data: { text } } = await worker.recognize(canvas);
-            // Strict Regex for CAS-XX-0000 format
-            const strictMatch = text.match(/CAS-[A-Z0-9]{1,3}-[0-9]{1,5}/i);
-            if (strictMatch && isMounted) {
-              const code = strictMatch[0].toUpperCase();
-              setSearchCode(code);
-              handleSearch(code);
-              setShowScanner(false);
-            }
-          } catch (err) { console.error("OCR Frame error", err); }
-        };
-        intervalId = setInterval(processFrame, 1100);
-      } catch (err) { console.error("Worker failed", err); }
-    };
-
-    startOCRProcess();
-    return () => {
-      isMounted = false;
-      if (intervalId) clearInterval(intervalId);
-      if (worker) worker.terminate();
-    };
-  }, [isOCRMode, showScanner, selectedCameraId]);
-
-  // --- Logic: Camera Start & Manual Focus ---
-  useEffect(() => {
-    let isMounted = true;
-    let timer: NodeJS.Timeout;
-
-    const startCamera = async () => {
-      if (!selectedCameraId) return;
-
-      timer = setTimeout(async () => {
-        const readerElement = document.getElementById("reader");
-        if (showScanner && isMounted && readerElement && !isStartingRef.current) {
-          try {
-            if (scannerRef.current && scannerRef.current.isScanning) {
-              await scannerRef.current.stop();
-            }
-
-            isStartingRef.current = true;
-            const html5QrCode = new Html5Qrcode("reader");
-            scannerRef.current = html5QrCode;
-
-            await html5QrCode.start(
-              selectedCameraId,
-              { 
-                fps: 25, 
-                qrbox: { width: 250, height: 250 }, 
-                aspectRatio: 1.0,
-              },
-              (text) => {
-                if (isOCRMode) return;
-                const code = processScannedText(text);
-                setSearchCode(code);
-                handleSearch(code);
-                setShowScanner(false);
-              },
-              () => {}
-            );
-
-            // Manual Focus constraints
-            const video = readerElement.querySelector("video");
-            if (video && video.srcObject) {
-                const track = (video.srcObject as MediaStream).getVideoTracks()[0];
-                const capabilities = track.getCapabilities() as any;
-                if (capabilities.focusMode) {
-                    await track.applyConstraints({
-                        advanced: [{ focusMode: capabilities.focusMode.includes('continuous') ? 'continuous' : 'manual' }]
-                    } as any);
-                }
-            }
-          } catch (err) {
-            console.error("Camera start failed:", err);
-          } finally {
-            isStartingRef.current = false;
-          }
-        }
-      }, 400);
-    };
-
-    startCamera();
-
-    return () => {
-      isMounted = false;
-      if (timer) clearTimeout(timer);
-      if (scannerRef.current && scannerRef.current.isScanning) {
-        scannerRef.current.stop().then(() => {
-          if (document.getElementById("reader")) scannerRef.current?.clear();
-        }).catch(e => console.warn("Stop failed:", e));
+    const initWorker = async () => {
+      if (!tesseractWorkerRef.current) {
+        const worker = await createWorker('eng');
+        tesseractWorkerRef.current = worker;
       }
     };
-  }, [showScanner, selectedCameraId, isOCRMode]);
 
-  // --- Logic: Image Upload Scan (QR & OCR) ---
-  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    setIsParsingImage(true);
-    setLoading(true);
+    const processFrame = async () => {
+      if (!isMounted || !isOCRMode || !showScanner || !tesseractWorkerRef.current) return;
 
-    const html5QrCode = new Html5Qrcode("hidden-reader");
-    try {
-      // First try to scan for QR Code
-      const text = await html5QrCode.scanFile(file, true);
-      const code = processScannedText(text);
-      setSearchCode(code);
-      handleSearch(code);
-    } catch (err) {
-      // If QR fails, try OCR on the uploaded image
+      const video = document.querySelector("#reader video") as HTMLVideoElement;
+      if (!video || video.readyState < 2) return;
+
+      // Logic: Extract a high-contrast crop for small text detection
+      const canvas = document.createElement("canvas");
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+
+      // Upscale frame slightly to help OCR see small characters
+      canvas.width = video.videoWidth * 1.2;
+      canvas.height = video.videoHeight * 1.2;
+      
+      // Apply Grayscale and Contrast Filter
+      ctx.filter = "grayscale(1) contrast(1.2)";
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
       try {
-        const worker = await createWorker('eng');
-        const { data: { text } } = await worker.recognize(file);
+        const { data: { text } } = await tesseractWorkerRef.current.recognize(canvas);
         const strictMatch = text.match(/CAS-[A-Z0-9]{1,3}-[0-9]{1,5}/i);
         
-        if (strictMatch) {
+        if (strictMatch && isMounted) {
           const code = strictMatch[0].toUpperCase();
           setSearchCode(code);
           handleSearch(code);
-        } else {
-          setIsInvalidModalOpen(true);
+          setShowScanner(false);
         }
-        await worker.terminate();
-      } catch (ocrErr) {
-        setIsInvalidModalOpen(true);
+      } catch (err) {
+        console.error("OCR Frame Error:", err);
       }
-    } finally {
-      setIsParsingImage(false);
-      setLoading(false);
-      if (fileInputRef.current) fileInputRef.current.value = "";
-    }
-  };
+    };
 
-  // --- Logic: Helpers & Database Search ---
+    if (showScanner && isOCRMode) {
+      initWorker().then(() => {
+        intervalId = setInterval(processFrame, 800); // Faster polling
+      });
+    }
+
+    return () => {
+      isMounted = false;
+      if (intervalId) clearInterval(intervalId);
+    };
+  }, [isOCRMode, showScanner]);
+
+  // Cleanup worker on unmount
+  useEffect(() => {
+    return () => {
+      if (tesseractWorkerRef.current) {
+        tesseractWorkerRef.current.terminate();
+        tesseractWorkerRef.current = null;
+      }
+    };
+  }, []);
+
+  // --- Logic: Handle Browser Navigation ---
+  useEffect(() => {
+    const handlePopState = () => {
+      const params = new URLSearchParams(window.location.search);
+      const code = params.get("c");
+      if (!code) {
+        setSelectedItem(null);
+        setSearchCode("");
+        setLoading(false);
+      } else {
+        handleSearch(code);
+      }
+    };
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, []);
+
+  useEffect(() => {
+    if (itemCodeFromUrl && !selectedItem) {
+      handleSearch(itemCodeFromUrl);
+    }
+  }, [itemCodeFromUrl]);
+
   const processScannedText = (text: string) => {
     let finalCode = text.trim();
     if (text.includes("?c=")) {
       try {
         const urlParts = text.split("?c=");
         if (urlParts[1]) finalCode = urlParts[1].split("&")[0];
-      } catch (e) { console.error("QR parse error", e); }
+      } catch (e) { console.error(e); }
     }
     return finalCode;
+  };
+
+  // --- Logic: High-Performance Camera Scanner ---
+  // --- Logic: High-Performance Camera Scanner ---
+useEffect(() => {
+  let isMounted = true;
+  let timer: NodeJS.Timeout;
+
+  const startCamera = async () => {
+    timer = setTimeout(async () => {
+      const readerElement = document.getElementById("reader");
+      if (showScanner && isMounted && readerElement && !isStartingRef.current) {
+        try {
+          if (scannerRef.current?.isScanning) return;
+          isStartingRef.current = true;
+          
+          const html5QrCode = new Html5Qrcode("reader");
+          scannerRef.current = html5QrCode;
+
+          const config = {
+            fps: 30, 
+            qrbox: (viewWidth: number, viewHeight: number) => {
+              const size = Math.min(viewWidth, viewHeight) * 0.7;
+              return { width: size, height: size };
+            },
+            aspectRatio: 1.0,
+            formatsToSupport: [ Html5QrcodeSupportedFormats.QR_CODE ]
+          };
+
+          await html5QrCode.start(
+            { facingMode: "environment" },
+            config,
+            (text) => {
+              if (isOCRMode) return;
+              const code = processScannedText(text);
+              setSearchCode(code);
+              handleSearch(code);
+              setShowScanner(false);
+            },
+            () => {} 
+          );
+
+          // --- SMART FIX FOR getRunningTrack ---
+          // Access the track via the scanner instance safely
+          const scanner = scannerRef.current;
+          if (scanner) {
+            // Some versions use getRunningTrack() on the instance, 
+            // others require accessing the underlying media stream
+            const track = (scanner as any).getRunningTrack ? 
+                          (scanner as any).getRunningTrack() : 
+                          null;
+
+            if (track && track.getCapabilities) {
+              const capabilities = track.getCapabilities();
+              // Check if zoom is supported by the hardware
+              if (capabilities.zoom) {
+                await track.applyConstraints({
+                  advanced: [
+                    { 
+                      zoom: capabilities.zoom.min + 1, // Slight zoom to help with small codes
+                      focusMode: "continuous" 
+                    }
+                  ]
+                });
+              }
+            }
+          }
+
+        } catch (err) {
+          console.error("Camera Init Error:", err);
+        } finally {
+          isStartingRef.current = false;
+        }
+      }
+    }, 300);
+  };
+
+  startCamera();
+
+  return () => {
+    isMounted = false;
+    if (timer) clearTimeout(timer);
+    if (scannerRef.current?.isScanning) {
+      scannerRef.current.stop().catch(e => console.warn("Cleanup error:", e));
+    }
+  };
+}, [showScanner, isOCRMode]);
+
+  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setIsParsingImage(true);
+    const html5QrCode = new Html5Qrcode("hidden-reader");
+    try {
+      const text = await html5QrCode.scanFile(file, true);
+      const code = processScannedText(text);
+      setSearchCode(code);
+      handleSearch(code);
+    } catch (err) {
+      setIsInvalidModalOpen(true);
+    } finally {
+      setIsParsingImage(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
   };
 
   async function handleSearch(codeToSearch?: string) {
@@ -222,16 +240,24 @@ function VerificationContent() {
       const item = await getItemByCode(cleanCode);
       if (item) {
         setSelectedItem(item);
-        if (itemCodeFromUrl !== cleanCode) router.push(`?c=${cleanCode}`, { scroll: false });
-      } else { setIsInvalidModalOpen(true); }
-    } catch (error) { setIsInvalidModalOpen(true); } 
-    finally { setLoading(false); }
+        if (itemCodeFromUrl !== cleanCode) {
+          router.push(`?c=${cleanCode}`, { scroll: false });
+        }
+      } else {
+        setIsInvalidModalOpen(true);
+      }
+    } catch (error) {
+      setIsInvalidModalOpen(true);
+    } finally {
+      setLoading(false);
+    }
   }
 
   const getStatusColor = (status: string) => {
     const s = status?.toLowerCase();
     if (s === "working" || s === "active") return "text-[#1e8e3e]";
     if (s === "not working" || s === "defective" || s === "broken") return "text-[#ba1a1a]";
+    if (s === "missing" || s === "lost") return "text-[#f9ab00]";
     return "text-[#44474e]";
   };
 
@@ -240,8 +266,8 @@ function VerificationContent() {
       <style>{`
         #reader video { width: 100% !important; height: 100% !important; object-fit: cover !important; border-radius: 32px; }
         #reader { border: none !important; }
-        @keyframes scan { 0% { top: 0; } 100% { top: 100%; } }
-        .animate-laser { animation: scan 2s linear infinite; }
+        @keyframes scanLine { 0% { transform: translateY(0); } 100% { transform: translateY(250px); } }
+        .scanner-laser { height: 2px; background: linear-gradient(to right, transparent, #0080ff, transparent); position: absolute; width: 80%; left: 10%; z-index: 30; animation: scanLine 2s linear infinite; box-shadow: 0 0 15px 2px rgba(0, 128, 255, 0.5); }
       `}</style>
 
       <div className="max-w-6xl mx-auto">
@@ -250,27 +276,38 @@ function VerificationContent() {
         {!selectedItem && !showScanner && (
           <div className="flex flex-col items-center justify-center min-h-[85vh] animate-in fade-in duration-700">
             <div className="w-full max-w-md text-center">
-              <h1 className="text-2xl font-bold mb-2">CAS Verification</h1>
-              <p className="text-[#44474e] text-sm mb-8">Scan equipment code or QR to verify asset.</p>
-              
+              <h1 className="text-2xl font-bold mb-2">CAS Equipment Verification</h1>
+              <p className="text-[#44474e] text-sm mb-8">Verify equipment by code, camera, or upload.</p>
               <div className="space-y-4">
                 <input 
                     value={searchCode}
                     onChange={(e) => setSearchCode(e.target.value)}
                     onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
                     placeholder="Enter item code" 
-                    className="w-full border border-[#74777f] p-4 rounded-xl text-center font-bold uppercase outline-none focus:border-[#005fb7] focus:border-2 cursor-text"
+                    className="w-full border border-[#74777f] p-4 rounded-xl text-center font-bold uppercase outline-none focus:border-[#005fb7] focus:border-2"
                 />
-                <button onClick={() => handleSearch()} disabled={loading || !searchCode} className="w-full bg-[#0080ff] text-white py-3.5 rounded-full font-bold h-[48px] disabled:opacity-40 cursor-pointer">
+                <button 
+                  onClick={() => handleSearch()}
+                  disabled={loading || !searchCode}
+                  className="w-full bg-[#0080ff] text-white py-3.5 rounded-full font-bold h-[48px] disabled:opacity-40 transition-all active:scale-[0.98]"
+                >
                   {loading ? "Verifying..." : "Verify Item"}
                 </button>
+                <div className="flex items-center gap-4 py-4">
+                  <div className="h-px bg-[#e0e2ec] flex-1"></div>
+                  <span className="text-xs font-bold text-[#74777f]">or</span>
+                  <div className="h-px bg-[#e0e2ec] flex-1"></div>
+                </div>
                 <div className="grid grid-cols-2 gap-4">
-                  <button onClick={() => { setIsOCRMode(true); setShowScanner(true); }} className="bg-[#f0f4f9] py-3.5 rounded-xl font-bold text-sm flex items-center justify-center gap-2 cursor-pointer transition-colors hover:bg-[#d3e3fd]">
+                  <button 
+                    onClick={() => { setIsOCRMode(true); setShowScanner(true); }} 
+                    className="bg-[#f0f4f9] py-3.5 rounded-xl font-bold text-sm flex items-center justify-center gap-2 hover:bg-[#d3e3fd]"
+                  >
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
                     Scan Code
                   </button>
-                  <button onClick={() => fileInputRef.current?.click()} className="bg-[#f0f4f9] py-3.5 rounded-xl font-bold text-sm flex items-center justify-center gap-2 cursor-pointer transition-colors hover:bg-[#d3e3fd]">
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/></svg>
+                  <button onClick={() => fileInputRef.current?.click()} className="bg-[#f0f4f9] py-3.5 rounded-xl font-bold text-sm flex items-center justify-center gap-2 hover:bg-[#d3e3fd]">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
                     Upload Image
                   </button>
                   <input type="file" ref={fileInputRef} onChange={handleImageUpload} accept="image/*" className="hidden" />
@@ -282,46 +319,43 @@ function VerificationContent() {
 
         {showScanner && (
           <div className="fixed inset-0 bg-white z-[100] flex flex-col animate-in slide-in-from-bottom-8 duration-500">
-            <div className="p-4 flex items-center justify-between border-b border-[#e0e2ec] bg-white">
-              <button onClick={() => setShowScanner(false)} className="p-2 rounded-full hover:bg-[#f0f4f9] cursor-pointer">
+            <div className="p-4 flex items-center justify-between border-b border-[#e0e2ec]">
+              <button onClick={() => setShowScanner(false)} className="p-2 rounded-full hover:bg-[#f0f4f9]">
                 <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#44474e" strokeWidth="2"><path d="M19 12H5m7 7l-7-7 7-7"/></svg>
               </button>
-              
-              <div className="flex-1 px-4 max-w-xs">
-                <select 
-                  value={selectedCameraId} 
-                  onChange={(e) => setSelectedCameraId(e.target.value)}
-                  className="w-full bg-[#f0f4f9] border border-[#e0e2ec] px-3 py-2 rounded-lg text-xs font-bold text-[#44474e] outline-none cursor-pointer"
-                >
-                  {cameras.map(camera => (
-                    <option key={camera.id} value={camera.id}>{camera.label || `Camera ${camera.id}`}</option>
-                  ))}
-                </select>
-              </div>
-
               <div className="flex bg-[#f0f4f9] p-1 rounded-full border border-[#e0e2ec]">
-                <button onClick={() => setIsOCRMode(true)} className={`px-4 py-1.5 rounded-full text-xs font-bold transition-all cursor-pointer ${isOCRMode ? 'bg-[#0080ff] text-white shadow-sm' : 'text-[#44474e]'}`}>OCR</button>
-                <button onClick={() => setIsOCRMode(false)} className={`px-4 py-1.5 rounded-full text-xs font-bold transition-all cursor-pointer ${!isOCRMode ? 'bg-[#0080ff] text-white shadow-sm' : 'text-[#44474e]'}`}>QR</button>
+                <button 
+                  onClick={() => setIsOCRMode(true)}
+                  className={`px-4 py-1.5 rounded-full text-xs font-bold transition-all ${isOCRMode ? 'bg-[#0080ff] text-white shadow-sm' : 'text-[#44474e]'}`}
+                >OCR Mode</button>
+                <button 
+                  onClick={() => setIsOCRMode(false)}
+                  className={`px-4 py-1.5 rounded-full text-xs font-bold transition-all ${!isOCRMode ? 'bg-[#0080ff] text-white shadow-sm' : 'text-[#44474e]'}`}
+                >QR Mode</button>
               </div>
+              <div className="w-10"></div>
             </div>
 
             <div className="flex-1 flex flex-col items-center justify-center p-6 bg-[#f0f4f9]">
               <div className="w-full max-w-sm bg-white p-2 rounded-[40px] shadow-sm border border-[#d3e3fd]">
                 <div className="relative aspect-square overflow-hidden rounded-[32px] bg-black">
                   <div id="reader" className="w-full h-full"></div>
+                  
+                  {/* Visual Overlay */}
                   <div className="absolute inset-0 border-[40px] border-black/40 pointer-events-none z-10"></div>
-                  <div className={`absolute top-0 left-0 w-full h-1 z-20 transition-all duration-500 ${isOCRMode ? 'animate-pulse h-full bg-blue-500/10 shadow-[inset_0_0_20px_rgba(59,130,246,0.2)]' : 'animate-laser bg-white/60 shadow-lg'}`}></div>
+                  <div className="scanner-laser"></div>
+                  
                   {isOCRMode && (
                     <div className="absolute top-4 left-0 w-full text-center z-30">
-                      <span className="bg-blue-600 text-white text-[10px] px-3 py-1 rounded-full font-bold tracking-widest animate-bounce uppercase">Auto-Detecting Item Code</span>
+                      <span className="bg-blue-600 text-white text-[10px] px-3 py-1 rounded-full font-bold tracking-widest animate-pulse">SMART OCR ACTIVE</span>
                     </div>
                   )}
                 </div>
               </div>
               <p className="mt-8 text-[#44474e] text-sm text-center bg-white/50 px-6 py-2 rounded-full font-medium">
-                {isOCRMode ? "Align the CAS-XX-0000 code in the frame" : "Center the QR code in the frame"}
+                {isOCRMode ? "Align the CAS code inside the square" : "Position the QR code inside the square"}
               </p>
-              <button onClick={() => setShowScanner(false)} className="mt-6 px-8 py-3 bg-white text-[#0080ff] border border-[#0080ff] rounded-full text-sm font-bold active:scale-95 cursor-pointer">Close Scanner</button>
+              <button onClick={() => setShowScanner(false)} className="mt-6 px-8 py-3 bg-white text-[#0080ff] border border-[#0080ff] rounded-full text-sm font-bold active:scale-95">Close Scanner</button>
             </div>
           </div>
         )}
@@ -425,8 +459,8 @@ function VerificationContent() {
 
       {loading && (
         <div className="fixed inset-0 bg-white/80 backdrop-blur-md z-[300] flex flex-col items-center justify-center animate-in fade-in">
-           <div className="w-12 h-12 border-4 border-[#d3e3fd] border-t-[#005fb7] rounded-full animate-spin mb-4"></div>
-           <p className="text-[#005fb7] font-bold text-sm tracking-wide">Verifying...</p>
+            <div className="w-12 h-12 border-4 border-[#d3e3fd] border-t-[#005fb7] rounded-full animate-spin mb-4"></div>
+            <p className="text-[#005fb7] font-bold text-sm tracking-wide">Processing...</p>
         </div>
       )}
 
@@ -434,7 +468,8 @@ function VerificationContent() {
         <div className="fixed inset-0 bg-black/30 backdrop-blur-sm flex items-center justify-center p-6 z-[200]">
           <div className="bg-white rounded-[28px] p-8 w-full max-w-sm text-center shadow-xl border border-[#e0e2ec]">
             <h2 className="text-xl font-medium mb-2">Record not found</h2>
-            <button onClick={() => setIsInvalidModalOpen(false)} className="w-full bg-[#005fb7] text-white py-3 rounded-full font-bold text-sm cursor-pointer mt-4">Try again</button>
+            <p className="text-[#44474e] text-sm mb-8">The code provided doesn't match any registered equipment.</p>
+            <button onClick={() => setIsInvalidModalOpen(false)} className="w-full bg-[#005fb7] text-white py-3 rounded-full font-bold text-sm">Try again</button>
           </div>
         </div>
       )}
