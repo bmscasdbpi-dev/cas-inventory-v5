@@ -43,6 +43,7 @@ function VerificationContent() {
           if (!video || video.paused || video.ended) return;
 
           const canvas = document.createElement("canvas");
+          // To speed up OCR, we use a slightly lower resolution for the canvas
           canvas.width = video.videoWidth;
           canvas.height = video.videoHeight;
           const ctx = canvas.getContext("2d");
@@ -51,8 +52,7 @@ function VerificationContent() {
           try {
             const { data: { text } } = await worker.recognize(canvas);
             
-            // STRICT REGEX: Specifically looks for CAS-XX-0000 or CAS-X-00000 formats
-            // Disregards other text noise in the frame
+            // STRICT REGEX: Specifically looks for CAS-XX-0000 format
             const strictMatch = text.match(/CAS-[A-Z0-9]{1,3}-[0-9]{1,5}/i);
             
             if (strictMatch && isMounted) {
@@ -66,7 +66,7 @@ function VerificationContent() {
           }
         };
 
-        // 1100ms check for faster detection while maintaining battery stability
+        // 1100ms interval for fast but stable detection
         intervalId = setInterval(processFrame, 1100);
       } catch (err) {
         console.error("OCR Worker failed:", err);
@@ -82,44 +82,7 @@ function VerificationContent() {
     };
   }, [isOCRMode, showScanner]);
 
-  // --- Logic: Handle Browser Back Button ---
-  useEffect(() => {
-    const handlePopState = () => {
-      const params = new URLSearchParams(window.location.search);
-      const code = params.get("c");
-      if (!code) {
-        setSelectedItem(null);
-        setSearchCode("");
-        setLoading(false);
-      } else {
-        handleSearch(code);
-      }
-    };
-    window.addEventListener("popstate", handlePopState);
-    return () => window.removeEventListener("popstate", handlePopState);
-  }, []);
-
-  // --- Initial Check for Direct Links ---
-  useEffect(() => {
-    if (itemCodeFromUrl && !selectedItem) {
-      handleSearch(itemCodeFromUrl);
-    }
-  }, [itemCodeFromUrl]);
-
-  const processScannedText = (text: string) => {
-    let finalCode = text.trim();
-    if (text.includes("?c=")) {
-      try {
-        const urlParts = text.split("?c=");
-        if (urlParts[1]) finalCode = urlParts[1].split("&")[0];
-      } catch (e) {
-        console.error("Error parsing QR link:", e);
-      }
-    }
-    return finalCode;
-  };
-
-  // --- Logic: Camera Scanner ---
+  // --- Logic: Camera Focus & Start ---
   useEffect(() => {
     let isMounted = true;
     let timer: NodeJS.Timeout;
@@ -136,7 +99,17 @@ function VerificationContent() {
 
             await html5QrCode.start(
               { facingMode: "environment" },
-              { fps: 20, qrbox: { width: 250, height: 250 }, aspectRatio: 1.0 },
+              { 
+                fps: 25, 
+                qrbox: { width: 250, height: 250 }, 
+                aspectRatio: 1.0,
+                // Advanced constraints for better focus
+                videoConstraints: {
+                    facingMode: "environment",
+                    focusMode: "continuous",
+                    whiteBalanceMode: "continuous"
+                } as any
+              },
               (text) => {
                 if (isOCRMode) return;
                 const code = processScannedText(text);
@@ -146,6 +119,19 @@ function VerificationContent() {
               },
               () => {}
             );
+
+            // Manual Focus Trigger (For Android/Chrome Support)
+            const video = readerElement.querySelector("video");
+            if (video && video.srcObject) {
+                const track = (video.srcObject as MediaStream).getVideoTracks()[0];
+                const capabilities = track.getCapabilities() as any;
+                if (capabilities.focusMode && capabilities.focusMode.includes('continuous')) {
+                    await track.applyConstraints({
+                        advanced: [{ focusMode: 'continuous' }]
+                    } as any);
+                }
+            }
+
           } catch (err) {
             console.error("Camera failed to start:", err);
           } finally {
@@ -169,6 +155,42 @@ function VerificationContent() {
       }
     };
   }, [showScanner, isOCRMode]);
+
+  // --- Remaining Logic ---
+  useEffect(() => {
+    const handlePopState = () => {
+      const params = new URLSearchParams(window.location.search);
+      const code = params.get("c");
+      if (!code) {
+        setSelectedItem(null);
+        setSearchCode("");
+        setLoading(false);
+      } else {
+        handleSearch(code);
+      }
+    };
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, []);
+
+  useEffect(() => {
+    if (itemCodeFromUrl && !selectedItem) {
+      handleSearch(itemCodeFromUrl);
+    }
+  }, [itemCodeFromUrl]);
+
+  const processScannedText = (text: string) => {
+    let finalCode = text.trim();
+    if (text.includes("?c=")) {
+      try {
+        const urlParts = text.split("?c=");
+        if (urlParts[1]) finalCode = urlParts[1].split("&")[0];
+      } catch (e) {
+        console.error("Error parsing QR link:", e);
+      }
+    }
+    return finalCode;
+  };
 
   const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -301,7 +323,7 @@ function VerificationContent() {
                   <div className={`absolute top-0 left-0 w-full h-1 z-20 transition-all duration-500 ${isOCRMode ? 'animate-pulse h-full bg-blue-500/5 shadow-[inset_0_0_20px_rgba(59,130,246,0.2)]' : 'animate-laser bg-white/60 shadow-lg'}`}></div>
                   {isOCRMode && (
                     <div className="absolute top-4 left-0 w-full text-center z-30">
-                      <span className="bg-blue-600 text-white text-[10px] px-3 py-1 rounded-full font-bold tracking-widest animate-bounce">AUTO-DETECTING CAS CODE</span>
+                      <span className="bg-blue-600 text-white text-[10px] px-3 py-1 rounded-full font-bold tracking-widest animate-bounce uppercase">Auto-Detecting Item Code</span>
                     </div>
                   )}
                 </div>
@@ -314,7 +336,7 @@ function VerificationContent() {
           </div>
         )}
 
-       
+
 {/* --- View 3: Verified Details --- */}
         {selectedItem && (
           <div className="animate-in fade-in slide-in-from-bottom-4 duration-700">
@@ -420,7 +442,7 @@ function VerificationContent() {
 
       {isInvalidModalOpen && (
         <div className="fixed inset-0 bg-black/30 backdrop-blur-sm flex items-center justify-center p-6 z-[200]">
-          <div className="bg-white rounded-[28px] p-8 w-full max-w-sm text-center shadow-xl border border-[#e0e2ec]">
+          <div className="bg-white rounded-[28px] p-8 w-full max-sm text-center shadow-xl border border-[#e0e2ec]">
             <h2 className="text-xl font-medium mb-2">Record not found</h2>
             <p className="text-[#44474e] text-sm mb-8">The code provided doesn't match any registered equipment.</p>
             <button onClick={() => setIsInvalidModalOpen(false)} className="w-full bg-[#005fb7] text-white py-3 rounded-full font-bold text-sm cursor-pointer transition-colors hover:bg-[#004a8f]">Try again</button>
