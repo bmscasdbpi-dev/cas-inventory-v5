@@ -28,6 +28,7 @@ function VerificationContent() {
   const [reportPhoto, setReportPhoto] = useState<File | null>(null);
   const [reportSuccess, setReportSuccess] = useState<boolean>(false);
   const [isCancelModalOpen, setIsCancelModalOpen] = useState<boolean>(false);
+  const [isDuplicateModalOpen, setIsDuplicateModalOpen] = useState<boolean>(false);
   const [reportData, setReportData] = useState({
     description: "",
     location: "",
@@ -41,6 +42,7 @@ function VerificationContent() {
   const liveOcrIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const cancelTimerRef = useRef<NodeJS.Timeout | null>(null);
   const hasInitialSearched = useRef(false);
+  const isVerifyingRef = useRef(false);
 
   // --- Helpers ---
   const playSuccessSound = () => {
@@ -66,7 +68,12 @@ function VerificationContent() {
     }).format(new Date());
   };
 
+  /**
+   * FIX: Clean Reset Logic
+   * Forces the UI back to View 1 by clearing all states and stripping the URL.
+   */
   const resetVerification = () => {
+    // 1. Clear Data States
     setSelectedItem(null);
     setSearchCode("");
     setLoading(false);
@@ -77,8 +84,17 @@ function VerificationContent() {
     setFoundItemsList([]);
     setReportPhoto(null);
     setOcrStatus("");
+    
+    // 2. Clear Logic Locks
+    isVerifyingRef.current = false;
+    hasInitialSearched.current = false; 
+    
     if (cancelTimerRef.current) clearTimeout(cancelTimerRef.current);
-    router.push('/', { scroll: true });
+    
+    // 3. Clean URL and Navigation
+    // Use window.history to ensure the browser doesn't think it needs to reload the 'c' param
+    window.history.replaceState(null, "", window.location.pathname);
+    router.replace('/', { scroll: true });
   };
 
   const removeReportPhoto = () => {
@@ -104,6 +120,8 @@ function VerificationContent() {
 
   // --- Core Functions ---
   const runLiveOCR = async () => {
+    if (isVerifyingRef.current) return;
+
     const videoElement = document.querySelector("#reader video") as HTMLVideoElement;
     if (!videoElement || videoElement.paused || videoElement.ended) return;
     const canvas = document.createElement("canvas");
@@ -117,37 +135,57 @@ function VerificationContent() {
       const { data: { text } } = await Tesseract.recognize(canvas, 'eng');
       const foundCode = extractItemCode(text);
       if (foundCode && foundCode.startsWith("CAS-") && foundCode.length >= 11) {
-        playSuccessSound(); 
-        setSearchCode(foundCode);
-        handleSearch(foundCode);
-        setShowScanner(false);
+        if (!isVerifyingRef.current) {
+            isVerifyingRef.current = true;
+            playSuccessSound(); 
+            setSearchCode(foundCode);
+            handleSearch(foundCode);
+            setShowScanner(false);
+        }
       }
-    } catch (e) {}
+    } catch (e) {
+      isVerifyingRef.current = false;
+    }
   };
 
   async function handleSearch(codeToSearch?: string) {
     const code = codeToSearch || searchCode;
     if (!code) {
       setLoading(false);
+      isVerifyingRef.current = false;
       return;
     }
+
     setLoading(true);
+    // Prepare for new display
+    setSelectedItem(null); 
+
     try {
         const item = await getItemByCode(code.trim().toUpperCase());
         if (item) {
           if (showReportForm) {
-            if (!foundItemsList.find(i => i.itemCode === item.itemCode)) {
+            if (foundItemsList.find(i => i.itemCode === item.itemCode)) {
+                setIsDuplicateModalOpen(true);
+            } else {
                 setFoundItemsList(prev => [...prev, item]);
                 playSuccessSound();
             }
           } else {
             setSelectedItem(item);
-            if (itemCodeFromUrl !== code.toUpperCase()) router.push(`?c=${code.toUpperCase()}`, { scroll: false });
+            // Push the code to URL so it's shareable, but don't scroll
+            router.push(`?c=${code.toUpperCase()}`, { scroll: false });
           }
           setSearchCode("");
-        } else { setIsInvalidModalOpen(true); }
-    } catch (error) { setIsInvalidModalOpen(true); }
-    finally { setLoading(false); }
+        } else { 
+          setIsInvalidModalOpen(true); 
+        }
+    } catch (error) { 
+        setIsInvalidModalOpen(true); 
+    }
+    finally { 
+        setLoading(false);
+        isVerifyingRef.current = false; 
+    }
   }
 
   const handlePhotoChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -164,7 +202,9 @@ function VerificationContent() {
 
   const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (!file) return;
+    if (!file || isVerifyingRef.current) return;
+    
+    isVerifyingRef.current = true;
     setIsParsingImage(true);
     setOcrStatus("Processing...");
     try {
@@ -178,11 +218,18 @@ function VerificationContent() {
         setOcrStatus("Reading Text...");
         const { data: { text } } = await Tesseract.recognize(file, 'eng');
         const code = extractItemCode(text);
-        if (code && code.includes("CAS-")) { playSuccessSound(); handleSearch(code); }
+        if (code && code.includes("CAS-")) { 
+          playSuccessSound(); 
+          handleSearch(code); 
+        }
         else { setIsInvalidModalOpen(true); }
       }
     } catch (err) { setIsInvalidModalOpen(true); }
-    finally { setIsParsingImage(false); setOcrStatus(""); }
+    finally { 
+        setIsParsingImage(false); 
+        setOcrStatus(""); 
+        isVerifyingRef.current = false;
+    }
   };
 
   const handleReportSubmit = async (e: React.FormEvent) => {
@@ -206,7 +253,6 @@ function VerificationContent() {
       const result = await submitFoundReport(formData); 
       if (result.success) {
         setReportSuccess(true);
-        // Timeout timer removed as per instruction 1
       }
     } catch (error) {
       alert("Failed to submit report. Please try again.");
@@ -233,25 +279,37 @@ function VerificationContent() {
     return () => { if (cancelTimerRef.current) clearTimeout(cancelTimerRef.current); };
   }, [loading, isParsingImage]);
 
+  // Sync URL changes with view state
   useEffect(() => {
     const handlePopState = () => {
       const params = new URLSearchParams(window.location.search);
       const code = params.get("c");
-      if (!code) { resetVerification(); } else { handleSearch(code); }
+      if (!code) { 
+        setSelectedItem(null);
+        setShowReportForm(false);
+        setSearchCode("");
+        hasInitialSearched.current = false;
+        isVerifyingRef.current = false;
+      } else if (code !== selectedItem?.itemCode) { 
+        handleSearch(code); 
+      }
     };
     window.addEventListener("popstate", handlePopState);
     return () => window.removeEventListener("popstate", handlePopState);
-  }, []);
+  }, [selectedItem]);
 
+  // Initial load check
   useEffect(() => {
     if (itemCodeFromUrl && !selectedItem && !hasInitialSearched.current) {
         hasInitialSearched.current = true;
         handleSearch(itemCodeFromUrl);
     } else if (!itemCodeFromUrl) {
         setLoading(false);
+        setSelectedItem(null);
     }
-  }, [itemCodeFromUrl, selectedItem]);
+  }, [itemCodeFromUrl]);
 
+  // Scanner Logic
   useEffect(() => {
     const startCamera = async () => {
       if (showScanner) {
@@ -264,16 +322,22 @@ function VerificationContent() {
               videoConstraints: { width: { min: 1280, ideal: 1920 }, height: { min: 720, ideal: 1080 }, facingMode: "environment" }
             },
             (text) => {
-              playSuccessSound();
-              const code = extractItemCode(text);
-              setSearchCode(code);
-              handleSearch(code);
-              setShowScanner(false);
+              if (!isVerifyingRef.current) {
+                  isVerifyingRef.current = true;
+                  playSuccessSound();
+                  const code = extractItemCode(text);
+                  setSearchCode(code);
+                  handleSearch(code);
+                  setShowScanner(false);
+              }
             },
             () => {}
           );
           liveOcrIntervalRef.current = setInterval(runLiveOCR, 1500);
-        } catch (err) { console.error(err); }
+        } catch (err) { 
+            console.error(err); 
+            isVerifyingRef.current = false; 
+        }
       }
     };
     startCamera();
@@ -467,7 +531,6 @@ function VerificationContent() {
                 </div>
               ) : (
                 <form onSubmit={handleReportSubmit} className="flex flex-col gap-6" style={{ fontSize: '15px' }}>
-                  
                   <div className="space-y-2">
                     <label className="font-bold uppercase text-[#74777f]" style={{ fontSize: '12px' }}>Date of Report</label>
                     <input 
@@ -483,7 +546,7 @@ function VerificationContent() {
                     <label className="font-bold uppercase text-[#74777f]" style={{ fontSize: '12px' }}>List of Found Items</label>
                     <div className="space-y-2 max-h-48 overflow-y-auto border border-[#e0e2ec] p-3 rounded-xl bg-[#fafafa]">
                       {foundItemsList.length === 0 && (
-                        <p className="text-[#74777f] italic text-center py-4" style={{ fontSize: '15px' }}>No items added yet. Use the box below to include items.</p>
+                        <p className="text-[#74777f] italic text-center py-4" style={{ fontSize: '15px' }}>No items added yet.</p>
                       )}
                       {foundItemsList.map((item) => (
                         <div key={item.itemCode} className="flex items-center justify-between bg-white border border-[#d3e3fd] p-3 rounded-xl animate-in slide-in-from-left-2">
@@ -509,7 +572,7 @@ function VerificationContent() {
                         value={searchCode} 
                         onChange={(e) => setSearchCode(e.target.value)} 
                         onKeyDown={(e) => e.key === 'Enter' && (e.preventDefault(), handleSearch())}
-                        placeholder="Enter Item Code of the found items" 
+                        placeholder="Item Code" 
                         className="flex-1 bg-[#f0f4f9] border border-[#e0e2ec] p-3 rounded-xl outline-none font-bold uppercase focus:border-[#005fb7] transition-all" 
                         style={{ fontSize: '15px' }}
                       />
@@ -517,19 +580,10 @@ function VerificationContent() {
                         type="button" 
                         onClick={() => handleSearch()} 
                         disabled={!searchCode}
-                        className="px-4 bg-[#005fb7] text-white rounded-xl font-bold hover:bg-[#004a91] transition-colors disabled:opacity-50 disabled:bg-gray-400 cursor-pointer"
+                        className="px-4 bg-[#005fb7] text-white rounded-xl font-bold hover:bg-[#004a91] cursor-pointer"
                         style={{ fontSize: '15px' }}
                       >
-                        ADD ITEM
-                      </button>
-                      <button 
-                        type="button" 
-                        onClick={() => setShowScanner(true)} 
-                        className="p-3 bg-[#f0f4f9] border border-[#e0e2ec] rounded-xl text-[#44474e] hover:bg-[#e0e2ec] transition-colors cursor-pointer"
-                      >
-                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                          <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/>
-                        </svg>
+                        ADD
                       </button>
                     </div>
                   </div>
@@ -540,7 +594,7 @@ function VerificationContent() {
                       required 
                       value={reportData.description} 
                       onChange={(e) => setReportData({...reportData, description: e.target.value})} 
-                      placeholder="Briefly describe the physical condition of the item/s..." 
+                      placeholder="Describe condition..." 
                       className="w-full border border-[#e0e2ec] p-3 rounded-xl min-h-[100px] outline-none focus:border-[#005fb7] transition-all" 
                       style={{ fontSize: '15px' }}
                     />
@@ -553,134 +607,67 @@ function VerificationContent() {
                       type="text" 
                       value={reportData.location} 
                       onChange={(e) => setReportData({...reportData, location: e.target.value})} 
-                      placeholder="Where exactly was it found?" 
+                      placeholder="Where?" 
                       className="w-full border border-[#e0e2ec] p-3 rounded-xl outline-none focus:border-[#005fb7] transition-all" 
                       style={{ fontSize: '15px' }}
                     />
                   </div>
 
                   <div className="space-y-2">
-                    <label className="font-bold uppercase text-[#74777f]" style={{ fontSize: '12px' }}>Photo Evidence (Limit 2MB)</label>
+                    <label className="font-bold uppercase text-[#74777f]" style={{ fontSize: '12px' }}>Photo Evidence</label>
                     {!reportPhoto ? (
                       <button 
                         type="button" 
                         onClick={() => reportPhotoRef.current?.click()} 
-                        className="w-full border-2 border-dashed border-[#e0e2ec] rounded-2xl p-6 flex flex-col items-center gap-2 hover:bg-blue-50 hover:border-[#005fb7] transition-all cursor-pointer"
+                        className="w-full border-2 border-dashed border-[#e0e2ec] rounded-2xl p-6 flex flex-col items-center gap-2 hover:bg-blue-50 cursor-pointer"
                       >
                         <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#005fb7" strokeWidth="2">
                           <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/>
                         </svg>
-                        <span className="text-[#005fb7] font-bold" style={{ fontSize: '15px' }}>Attach Item Photo</span>
+                        <span className="text-[#005fb7] font-bold" style={{ fontSize: '15px' }}>Attach Photo</span>
                       </button>
                     ) : (
-                      <div className="relative group rounded-2xl overflow-hidden border border-[#005fb7]">
-                        <div className="p-4 bg-blue-50 flex items-center justify-between">
-                          <div className="flex items-center gap-3">
-                            <div className="w-10 h-10 bg-white rounded-lg flex items-center justify-center border border-blue-100">
-                              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#005fb7" strokeWidth="2">
-                                <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/>
-                              </svg>
-                            </div>
-                            <p className="font-bold text-[#005fb7] truncate max-w-[150px]" style={{ fontSize: '15px' }}>{reportPhoto.name}</p>
-                          </div>
-                          <button 
-                            type="button" 
-                            onClick={removeReportPhoto} 
-                            className="px-3 py-1.5 bg-red-50 text-red-600 rounded-lg font-bold hover:bg-red-100 transition-colors cursor-pointer"
-                            style={{ fontSize: '15px' }}
-                          >
-                            REMOVE
-                          </button>
-                        </div>
+                      <div className="p-4 bg-blue-50 flex items-center justify-between border border-[#005fb7] rounded-xl">
+                        <p className="font-bold text-[#005fb7] truncate">{reportPhoto.name}</p>
+                        <button type="button" onClick={removeReportPhoto} className="text-red-600 font-bold ml-2">REMOVE</button>
                       </div>
                     )}
-                    <input 
-                      type="file" 
-                      ref={reportPhotoRef} 
-                      onChange={handlePhotoChange} 
-                      accept="image/*" 
-                      capture="environment" 
-                      className="hidden" 
-                    />
+                    <input type="file" ref={reportPhotoRef} onChange={handlePhotoChange} accept="image/*" capture="environment" className="hidden" />
                   </div>
 
                   <div className="space-y-4 pt-4 border-t border-[#e0e2ec]">
-                    <h4 className="font-bold text-[#005fb7] uppercase tracking-widest" style={{ fontSize: '12px' }}>Contact Information</h4>
-                    <div className="space-y-3">
-                      <div className="space-y-1">
-                        <label className="text-[10px] font-bold text-[#74777f] ml-1">NAME</label>
-                        <input 
-                          required 
-                          type="text" 
-                          value={reportData.foundBy} 
-                          onChange={(e) => setReportData({...reportData, foundBy: e.target.value})} 
-                          placeholder="Enter your full name" 
-                          className="w-full border border-[#e0e2ec] p-3 rounded-xl outline-none focus:border-[#005fb7] transition-all" 
-                          style={{ fontSize: '15px' }}
-                        />
-                      </div>
-                      <div className="space-y-1">
-                        <label className="text-[10px] font-bold text-[#74777f] ml-1">CONTACT NUMBER</label>
-                        <input 
-                          required 
-                          type="tel" 
-                          value={reportData.contactNumber} 
-                          onChange={(e) => setReportData({...reportData, contactNumber: e.target.value})} 
-                          placeholder="Enter active phone number" 
-                          className="w-full border border-[#e0e2ec] p-3 rounded-xl outline-none focus:border-[#005fb7] transition-all" 
-                          style={{ fontSize: '15px' }}
-                        />
-                      </div>
-                    </div>
+                    <input required type="text" value={reportData.foundBy} onChange={(e) => setReportData({...reportData, foundBy: e.target.value})} placeholder="Your Name" className="w-full border border-[#e0e2ec] p-3 rounded-xl outline-none" style={{ fontSize: '15px' }} />
+                    <input required type="tel" value={reportData.contactNumber} onChange={(e) => setReportData({...reportData, contactNumber: e.target.value})} placeholder="Contact Number" className="w-full border border-[#e0e2ec] p-3 rounded-xl outline-none" style={{ fontSize: '15px' }} />
                   </div>
 
-                  <div className="pt-4 space-y-4">
-                    <div className="flex justify-between items-center px-4 py-2 bg-gray-50 rounded-xl border border-dashed border-gray-300">
-                      <span className="font-bold text-[#74777f] uppercase" style={{ fontSize: '12px' }}>Total Number of Item/s:</span>
-                      <span className="font-bold text-[#005fb7] text-lg">{foundItemsList.length}</span>
-                    </div>
-                    
-                    <button 
-                      type="submit" 
-                      disabled={isReporting} 
-                      className="w-full bg-[#005fb7] text-white py-4 rounded-full font-bold shadow-lg hover:shadow-xl transition-all active:scale-95 disabled:opacity-50 cursor-pointer"
-                      style={{ fontSize: '15px' }}
-                    >
-                      {isReporting ? "Sending Report..." : "Submit Found Report"}
-                    </button>
-                  </div>
+                  <button 
+                    type="submit" 
+                    disabled={isReporting} 
+                    className="w-full bg-[#005fb7] text-white py-4 rounded-full font-bold shadow-lg hover:shadow-xl transition-all disabled:opacity-50 cursor-pointer"
+                    style={{ fontSize: '15px' }}
+                  >
+                    {isReporting ? "Sending..." : "Submit Report"}
+                  </button>
                 </form>
               )}
             </div>
 
+            {isDuplicateModalOpen && (
+              <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-[700] flex items-center justify-center p-6 animate-in fade-in">
+                <div className="bg-white rounded-[28px] p-8 w-full max-w-sm text-center">
+                  <h2 className="text-xl font-bold mb-3">Already Added</h2>
+                  <button type="button" onClick={() => setIsDuplicateModalOpen(false)} className="w-full bg-[#005fb7] text-white py-3 rounded-full font-bold cursor-pointer">Got it</button>
+                </div>
+              </div>
+            )}
+
             {isCancelModalOpen && (
-              <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-[600] flex items-center justify-center p-6 animate-in fade-in duration-200">
-                <div className="bg-white rounded-[28px] p-8 w-full max-w-sm mx-auto text-center shadow-2xl border border-[#e0e2ec]">
-                  <h2 className="text-xl font-bold mb-3 text-[#1a1c1e]">Cancel Report?</h2>
-                  <p className="text-[#44474e] mb-8 leading-relaxed" style={{ fontSize: '15px' }}>
-                    Are you sure you want to cancel reporting found item/s? All progress and attached photo will be lost.
-                  </p>
+              <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-[600] flex items-center justify-center p-6 animate-in fade-in">
+                <div className="bg-white rounded-[28px] p-8 w-full max-w-sm text-center">
+                  <h2 className="text-xl font-bold mb-3">Cancel Report?</h2>
                   <div className="flex flex-col gap-3">
-                    <button 
-                      type="button"
-                      onClick={() => {
-                        removeReportPhoto();
-                        setShowReportForm(false);
-                        setIsCancelModalOpen(false);
-                      }} 
-                      className="w-full bg-red-600 text-white py-3 rounded-full font-bold cursor-pointer hover:bg-red-700 transition-colors"
-                      style={{ fontSize: '15px' }}
-                    >
-                      Yes, Cancel
-                    </button>
-                    <button 
-                      type="button"
-                      onClick={() => setIsCancelModalOpen(false)} 
-                      className="w-full bg-[#f0f4f9] text-[#1a1c1e] py-3 rounded-full font-bold cursor-pointer hover:bg-[#e0e2ec] transition-colors"
-                      style={{ fontSize: '15px' }}
-                    >
-                      No, Keep Editing
-                    </button>
+                    <button type="button" onClick={() => { removeReportPhoto(); setShowReportForm(false); setIsCancelModalOpen(false); }} className="w-full bg-red-600 text-white py-3 rounded-full font-bold cursor-pointer">Yes, Cancel</button>
+                    <button type="button" onClick={() => setIsCancelModalOpen(false)} className="w-full bg-[#f0f4f9] text-[#1a1c1e] py-3 rounded-full font-bold cursor-pointer">No</button>
                   </div>
                 </div>
               </div>
@@ -692,8 +679,8 @@ function VerificationContent() {
         {(loading || isParsingImage) && (
           <div className="fixed inset-0 bg-white/80 backdrop-blur-md z-[300] flex flex-col items-center justify-center p-6 animate-in fade-in duration-300">
             <div className="w-12 h-12 border-4 border-[#d3e3fd] border-t-[#005fb7] rounded-full animate-spin mb-4"></div>
-            <p className="text-[#005fb7] font-bold tracking-wide uppercase mb-8" style={{ fontSize: '15px' }}>{isParsingImage ? (ocrStatus || "Reading...") : "Verifying..."}</p>
-            {showCancel && <button onClick={resetVerification} className="px-6 py-2.5 bg-white border border-red-600 text-red-600 rounded-full font-bold shadow-sm cursor-pointer" style={{ fontSize: '15px' }}>Cancel Verification</button>}
+            <p className="text-[#005fb7] font-bold tracking-wide uppercase" style={{ fontSize: '15px' }}>{isParsingImage ? (ocrStatus || "Reading...") : "Verifying..."}</p>
+            {showCancel && <button onClick={resetVerification} className="mt-8 px-6 py-2.5 bg-white border border-red-600 text-red-600 rounded-full font-bold shadow-sm cursor-pointer" style={{ fontSize: '15px' }}>Cancel Verification</button>}
           </div>
         )}
 
@@ -701,7 +688,7 @@ function VerificationContent() {
           <div className="fixed inset-0 bg-[#041e49]/30 backdrop-blur-sm flex items-center justify-center p-6 z-[200]">
             <div className="bg-white rounded-[28px] p-8 w-full max-w-sm text-center shadow-xl border border-[#e0e2ec]">
               <h2 className="text-xl font-medium mb-2">Record not found</h2>
-              <p className="text-[#44474e] mb-8" style={{ fontSize: '15px' }}>The code provided doesn't match any registered equipment.</p>
+              <p className="text-[#44474e] mb-8" style={{ fontSize: '15px' }}>The code doesn't match any registered equipment.</p>
               <button onClick={() => setIsInvalidModalOpen(false)} className="w-full bg-[#005fb7] text-white py-3 rounded-full font-bold cursor-pointer" style={{ fontSize: '15px' }}>Try again</button>
             </div>
           </div>
