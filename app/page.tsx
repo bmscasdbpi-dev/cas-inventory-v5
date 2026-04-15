@@ -20,49 +20,30 @@ function VerificationContent() {
   const [isParsingImage, setIsParsingImage] = useState<boolean>(false);
   const [ocrStatus, setOcrStatus] = useState<string>("");
   
-  // New States for Scan Intelligence
-  const [scannerFeedback, setScannerFeedback] = useState<"ready" | "blurred" | "reading">("ready");
-
   const fileInputRef = useRef<HTMLInputElement>(null);
   const scannerRef = useRef<Html5Qrcode | null>(null);
   const liveOcrIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
-  // --- Utility: Play Beep Sound ---
-  const playSuccessBeep = () => {
+  // --- Audio Logic: Grocery Beep ---
+  const playBeep = () => {
     try {
       const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
       const oscillator = audioCtx.createOscillator();
       const gainNode = audioCtx.createGain();
 
+      oscillator.type = "sine";
+      oscillator.frequency.setValueAtTime(800, audioCtx.currentTime); // High pitch frequency
+      gainNode.gain.setValueAtTime(0.1, audioCtx.currentTime);
+      gainNode.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.1); // Quick fade
+
       oscillator.connect(gainNode);
       gainNode.connect(audioCtx.destination);
 
-      oscillator.type = "sine";
-      oscillator.frequency.setValueAtTime(880, audioCtx.currentTime); // High pitch A5
-      gainNode.gain.setValueAtTime(0, audioCtx.currentTime);
-      gainNode.gain.linearRampToValueAtTime(0.2, audioCtx.currentTime + 0.05);
-      gainNode.gain.linearRampToValueAtTime(0, audioCtx.currentTime + 0.15);
-
       oscillator.start();
-      oscillator.stop(audioCtx.currentTime + 0.2);
+      oscillator.stop(audioCtx.currentTime + 0.1);
     } catch (e) {
-      console.warn("Audio beep failed", e);
+      console.error("Audio beep failed:", e);
     }
-  };
-
-  // --- Utility: Check Image Sharpness (Blur Detection) ---
-  const checkIsBlurred = (ctx: CanvasRenderingContext2D, width: number, height: number) => {
-    const imageData = ctx.getImageData(0, 0, width, height);
-    const data = imageData.data;
-    let score = 0;
-    for (let i = 0; i < data.length; i += 4) {
-      const avg = (data[i] + data[i + 1] + data[i + 2]) / 3;
-      // Simple variance check
-      score += avg;
-    }
-    // Note: In a production environment, a Laplacian variance check is ideal.
-    // For this implementation, we use the OCR feedback loop as the primary blur indicator.
-    return false; 
   };
 
   // --- Logic: Extract code from QR or Text ---
@@ -73,9 +54,11 @@ function VerificationContent() {
         if (urlParts[1]) return urlParts[1].split("&")[0].trim().toUpperCase();
       } catch (e) { console.error("URL Parse error", e); }
     }
+
     const regex = /CAS-[A-Z0-9]{2}-[A-Z0-9]{4}/i;
     const match = text.match(regex);
     if (match) return match[0].toUpperCase();
+
     return text.trim().toUpperCase();
   };
 
@@ -93,27 +76,18 @@ function VerificationContent() {
     ctx.filter = "contrast(1.4) grayscale(1)";
     ctx.drawImage(videoElement, 0, 0, canvas.width, canvas.height);
     
-    setScannerFeedback("reading");
-
     try {
-      const { data: { text, confidence } } = await Tesseract.recognize(canvas, 'eng');
-      
-      // Real-time Blur Detection via OCR Confidence
-      if (confidence < 40) {
-        setScannerFeedback("blurred");
-      } else {
-        setScannerFeedback("ready");
-      }
-
+      const { data: { text } } = await Tesseract.recognize(canvas, 'eng');
       const foundCode = extractItemCode(text);
+      
       if (foundCode && foundCode.startsWith("CAS-") && foundCode.length >= 11) {
-        playSuccessBeep();
+        playBeep(); // Play sound on OCR success
         setSearchCode(foundCode);
         handleSearch(foundCode);
         setShowScanner(false);
       }
     } catch (e) {
-      setScannerFeedback("ready");
+      // Ignore OCR errors
     }
   };
 
@@ -140,7 +114,7 @@ function VerificationContent() {
     }
   }, [itemCodeFromUrl]);
 
-  // --- Logic: Camera Scanner (QR + Live OCR Loop) ---
+  // --- Logic: Camera Scanner ---
   useEffect(() => {
     const startCamera = async () => {
       if (showScanner) {
@@ -162,7 +136,7 @@ function VerificationContent() {
             },
             (text) => {
               const code = extractItemCode(text);
-              playSuccessBeep();
+              playBeep(); // Play sound on QR success
               setSearchCode(code);
               handleSearch(code);
               setShowScanner(false);
@@ -190,6 +164,7 @@ function VerificationContent() {
     };
   }, [showScanner]);
 
+  // --- Logic: OCR from Image Upload ---
   const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -202,7 +177,7 @@ function VerificationContent() {
       try {
         const text = await html5QrCode.scanFile(file, true);
         const code = extractItemCode(text);
-        playSuccessBeep();
+        playBeep(); // Play sound on successful file scan
         setSearchCode(code);
         handleSearch(code);
       } catch (qrErr) {
@@ -211,7 +186,7 @@ function VerificationContent() {
         const code = extractItemCode(text);
         
         if (code && code.includes("CAS-")) {
-          playSuccessBeep();
+          playBeep();
           setSearchCode(code);
           handleSearch(code);
         } else {
@@ -227,6 +202,7 @@ function VerificationContent() {
     }
   };
 
+  // --- Logic: Database Search ---
   async function handleSearch(codeToSearch?: string) {
     const code = codeToSearch || searchCode;
     if (!code) return;
@@ -330,22 +306,10 @@ function VerificationContent() {
               <div className="w-10"></div>
             </div>
             <div className="flex-1 flex flex-col items-center justify-center p-6 bg-[#f0f4f9]">
-              {/* Intelligent Feedback Indicator */}
-              <div className={`mb-4 px-4 py-1.5 rounded-full text-xs font-bold transition-all duration-300 flex items-center gap-2 ${
-                scannerFeedback === "blurred" ? "bg-[#ba1a1a] text-white animate-pulse" : 
-                scannerFeedback === "reading" ? "bg-[#0080ff] text-white" : "bg-[#c4eed0] text-[#072711]"
-              }`}>
-                <div className={`w-2 h-2 rounded-full ${scannerFeedback === "reading" ? "animate-ping bg-white" : "bg-current"}`}></div>
-                {scannerFeedback === "blurred" ? "CAMERA BLURRED - HOLD STEADY" : 
-                 scannerFeedback === "reading" ? "ANALYZING LABEL..." : "READY TO SCAN"}
-              </div>
-
               <div className="w-full max-w-sm bg-white p-2 rounded-[40px] shadow-sm border border-[#d3e3fd]">
                 <div className="relative aspect-square overflow-hidden rounded-[32px] bg-black">
                   <div id="reader" className="w-full h-full"></div>
-                  <div className={`absolute inset-0 border-[35px] pointer-events-none z-10 transition-colors duration-300 ${
-                    scannerFeedback === "blurred" ? "border-[#ba1a1a]/40" : "border-black/40"
-                  }`}></div>
+                  <div className="absolute inset-0 border-[35px] border-black/40 pointer-events-none z-10"></div>
                   <div className="absolute top-0 left-0 w-full h-1 bg-white/60 shadow-[0_0_15px_rgba(255,255,255,0.8)] animate-laser z-20"></div>
                 </div>
               </div>
@@ -451,7 +415,6 @@ function VerificationContent() {
         )}
       </div>
 
-      {/* --- Global Loading/OCR Modal --- */}
       {(loading || isParsingImage) && (
         <div className="fixed inset-0 bg-white/80 backdrop-blur-md z-[300] flex flex-col items-center justify-center animate-in fade-in duration-300">
            <div className="w-12 h-12 border-4 border-[#d3e3fd] border-t-[#005fb7] rounded-full animate-spin mb-4"></div>
@@ -461,7 +424,6 @@ function VerificationContent() {
         </div>
       )}
 
-      {/* --- Error Modal --- */}
       {isInvalidModalOpen && (
         <div className="fixed inset-0 bg-[#041e49]/30 backdrop-blur-sm flex items-center justify-center p-6 z-[200]">
           <div className="bg-white rounded-[28px] p-8 w-full max-w-sm text-center shadow-xl border border-[#e0e2ec]">
