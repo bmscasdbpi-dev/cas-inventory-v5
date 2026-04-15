@@ -24,23 +24,22 @@ function VerificationContent() {
   const scannerRef = useRef<Html5Qrcode | null>(null);
   const liveOcrIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
-  // --- Audio Logic: Grocery Beep ---
-  const playBeep = () => {
+  // --- Logic: Audio Success Beep (High Pitch) ---
+  const playSuccessSound = () => {
     try {
       const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
       const oscillator = audioCtx.createOscillator();
       const gainNode = audioCtx.createGain();
 
       oscillator.type = "sine";
-      oscillator.frequency.setValueAtTime(800, audioCtx.currentTime); // High pitch frequency
-      gainNode.gain.setValueAtTime(0.1, audioCtx.currentTime);
-      gainNode.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.1); // Quick fade
-
+      oscillator.frequency.setValueAtTime(880, audioCtx.currentTime); // High pitch A5 note
+      gainNode.gain.setValueAtTime(0.2, audioCtx.currentTime); // Volume control
+      
       oscillator.connect(gainNode);
       gainNode.connect(audioCtx.destination);
 
       oscillator.start();
-      oscillator.stop(audioCtx.currentTime + 0.1);
+      oscillator.stop(audioCtx.currentTime + 0.15); // Short sharp beep
     } catch (e) {
       console.error("Audio beep failed:", e);
     }
@@ -48,6 +47,7 @@ function VerificationContent() {
 
   // --- Logic: Extract code from QR or Text ---
   const extractItemCode = (text: string) => {
+    // 1. Check if it's a URL with a query param
     if (text.includes("?c=")) {
       try {
         const urlParts = text.split("?c=");
@@ -55,6 +55,7 @@ function VerificationContent() {
       } catch (e) { console.error("URL Parse error", e); }
     }
 
+    // 2. OCR/Regex Match for CAS-XX-XXXX format
     const regex = /CAS-[A-Z0-9]{2}-[A-Z0-9]{4}/i;
     const match = text.match(regex);
     if (match) return match[0].toUpperCase();
@@ -73,6 +74,7 @@ function VerificationContent() {
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
+    // Apply high contrast filter to help Tesseract read small text
     ctx.filter = "contrast(1.4) grayscale(1)";
     ctx.drawImage(videoElement, 0, 0, canvas.width, canvas.height);
     
@@ -80,14 +82,15 @@ function VerificationContent() {
       const { data: { text } } = await Tesseract.recognize(canvas, 'eng');
       const foundCode = extractItemCode(text);
       
+      // If a code is found and matches our format CAS-XX-XXXX
       if (foundCode && foundCode.startsWith("CAS-") && foundCode.length >= 11) {
-        playBeep(); // Play sound on OCR success
+        playSuccessSound(); // Play Sound
         setSearchCode(foundCode);
         handleSearch(foundCode);
         setShowScanner(false);
       }
     } catch (e) {
-      // Ignore OCR errors
+      // Ignore OCR errors in background loop
     }
   };
 
@@ -108,13 +111,14 @@ function VerificationContent() {
     return () => window.removeEventListener("popstate", handlePopState);
   }, []);
 
+  // --- Initial Check for Direct Links ---
   useEffect(() => {
     if (itemCodeFromUrl && !selectedItem) {
       handleSearch(itemCodeFromUrl);
     }
   }, [itemCodeFromUrl]);
 
-  // --- Logic: Camera Scanner ---
+  // --- Logic: Camera Scanner (QR + Live OCR Loop) ---
   useEffect(() => {
     const startCamera = async () => {
       if (showScanner) {
@@ -125,9 +129,10 @@ function VerificationContent() {
           await html5QrCode.start(
             { facingMode: "environment" },
             {
-              fps: 30,
+              fps: 30, // Higher FPS for "instant" feel
               qrbox: { width: 280, height: 280 },
               aspectRatio: 1.0,
+              // Force high resolution to see small codes/text
               videoConstraints: {
                 width: { min: 1280, ideal: 1920 },
                 height: { min: 720, ideal: 1080 },
@@ -135,8 +140,8 @@ function VerificationContent() {
               }
             },
             (text) => {
+              playSuccessSound(); // Play Sound
               const code = extractItemCode(text);
-              playBeep(); // Play sound on QR success
               setSearchCode(code);
               handleSearch(code);
               setShowScanner(false);
@@ -144,6 +149,7 @@ function VerificationContent() {
             () => {}
           );
 
+          // Start the background OCR process every 1.5 seconds
           liveOcrIntervalRef.current = setInterval(runLiveOCR, 1500);
 
         } catch (err) {
@@ -177,7 +183,7 @@ function VerificationContent() {
       try {
         const text = await html5QrCode.scanFile(file, true);
         const code = extractItemCode(text);
-        playBeep(); // Play sound on successful file scan
+        playSuccessSound(); // Play Sound
         setSearchCode(code);
         handleSearch(code);
       } catch (qrErr) {
@@ -186,7 +192,7 @@ function VerificationContent() {
         const code = extractItemCode(text);
         
         if (code && code.includes("CAS-")) {
-          playBeep();
+          playSuccessSound(); // Play Sound
           setSearchCode(code);
           handleSearch(code);
         } else {
@@ -247,6 +253,7 @@ function VerificationContent() {
       <div className="max-w-6xl mx-auto">
         <div id="hidden-reader" className="hidden"></div>
 
+        {/* --- View 1: Search Screen --- */}
         {!selectedItem && !showScanner && (
           <div className="flex flex-col items-center justify-center min-h-[85vh] animate-in fade-in duration-700">
             <div className="w-full max-w-md text-center">
@@ -415,6 +422,7 @@ function VerificationContent() {
         )}
       </div>
 
+      {/* --- Global Loading/OCR Modal --- */}
       {(loading || isParsingImage) && (
         <div className="fixed inset-0 bg-white/80 backdrop-blur-md z-[300] flex flex-col items-center justify-center animate-in fade-in duration-300">
            <div className="w-12 h-12 border-4 border-[#d3e3fd] border-t-[#005fb7] rounded-full animate-spin mb-4"></div>
@@ -424,6 +432,7 @@ function VerificationContent() {
         </div>
       )}
 
+      {/* --- Error Modal --- */}
       {isInvalidModalOpen && (
         <div className="fixed inset-0 bg-[#041e49]/30 backdrop-blur-sm flex items-center justify-center p-6 z-[200]">
           <div className="bg-white rounded-[28px] p-8 w-full max-w-sm text-center shadow-xl border border-[#e0e2ec]">
