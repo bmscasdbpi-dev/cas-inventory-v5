@@ -22,6 +22,7 @@ function VerificationContent() {
   
   const fileInputRef = useRef<HTMLInputElement>(null);
   const scannerRef = useRef<Html5Qrcode | null>(null);
+  const liveOcrIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
   // --- Logic: Extract code from QR or Text ---
   const extractItemCode = (text: string) => {
@@ -39,6 +40,36 @@ function VerificationContent() {
     if (match) return match[0].toUpperCase();
 
     return text.trim().toUpperCase();
+  };
+
+  // --- Logic: Live Background OCR (for Instant Text Reading) ---
+  const runLiveOCR = async () => {
+    const videoElement = document.querySelector("#reader video") as HTMLVideoElement;
+    if (!videoElement || videoElement.paused || videoElement.ended) return;
+
+    const canvas = document.createElement("canvas");
+    canvas.width = videoElement.videoWidth;
+    canvas.height = videoElement.videoHeight;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    // Apply high contrast filter to help Tesseract read small text
+    ctx.filter = "contrast(1.4) grayscale(1)";
+    ctx.drawImage(videoElement, 0, 0, canvas.width, canvas.height);
+    
+    try {
+      const { data: { text } } = await Tesseract.recognize(canvas, 'eng');
+      const foundCode = extractItemCode(text);
+      
+      // If a code is found and matches our format CAS-XX-XXXX
+      if (foundCode && foundCode.startsWith("CAS-") && foundCode.length >= 11) {
+        setSearchCode(foundCode);
+        handleSearch(foundCode);
+        setShowScanner(false);
+      }
+    } catch (e) {
+      // Ignore OCR errors in background loop
+    }
   };
 
   // --- Logic: Browser Back Button ---
@@ -65,7 +96,7 @@ function VerificationContent() {
     }
   }, [itemCodeFromUrl]);
 
-  // --- Logic: Camera Scanner (QR + Fallback Frame Capture for OCR) ---
+  // --- Logic: Camera Scanner (QR + Live OCR Loop) ---
   useEffect(() => {
     const startCamera = async () => {
       if (showScanner) {
@@ -76,9 +107,15 @@ function VerificationContent() {
           await html5QrCode.start(
             { facingMode: "environment" },
             {
-              fps: 20,
-              qrbox: { width: 250, height: 250 },
+              fps: 30, // Higher FPS for "instant" feel
+              qrbox: { width: 280, height: 280 },
               aspectRatio: 1.0,
+              // Force high resolution to see small codes/text
+              videoConstraints: {
+                width: { min: 1280, ideal: 1920 },
+                height: { min: 720, ideal: 1080 },
+                facingMode: "environment"
+              }
             },
             (text) => {
               const code = extractItemCode(text);
@@ -88,6 +125,10 @@ function VerificationContent() {
             },
             () => {}
           );
+
+          // Start the background OCR process every 1.5 seconds
+          liveOcrIntervalRef.current = setInterval(runLiveOCR, 1500);
+
         } catch (err) {
           console.error("Scanner failed to start:", err);
         }
@@ -97,6 +138,7 @@ function VerificationContent() {
     startCamera();
 
     return () => {
+      if (liveOcrIntervalRef.current) clearInterval(liveOcrIntervalRef.current);
       if (scannerRef.current && scannerRef.current.isScanning) {
         scannerRef.current.stop().then(() => {
             scannerRef.current?.clear();
@@ -111,10 +153,9 @@ function VerificationContent() {
     if (!file) return;
 
     setIsParsingImage(true);
-    setOcrStatus("Scanning for QR...");
+    setOcrStatus("Processing...");
 
     try {
-      // Step 1: Try QR Scanning first
       const html5QrCode = new Html5Qrcode("hidden-reader");
       try {
         const text = await html5QrCode.scanFile(file, true);
@@ -122,12 +163,10 @@ function VerificationContent() {
         setSearchCode(code);
         handleSearch(code);
       } catch (qrErr) {
-        // Step 2: Fallback to OCR if QR fails
-        setOcrStatus("Reading Text (OCR)...");
+        setOcrStatus("Reading Text...");
         const { data: { text } } = await Tesseract.recognize(file, 'eng');
         const code = extractItemCode(text);
         
-        // Validate if found code matches format
         if (code && code.includes("CAS-")) {
           setSearchCode(code);
           handleSearch(code);
@@ -194,7 +233,7 @@ function VerificationContent() {
           <div className="flex flex-col items-center justify-center min-h-[85vh] animate-in fade-in duration-700">
             <div className="w-full max-w-md text-center">
               <h1 className="text-2xl font-bold mb-2 text-[#1a1c1e]">CAS Equipment Verification</h1>
-              <p className="text-[#44474e] text-sm mb-8">Verify by code, camera, or item tag photo.</p>
+              <p className="text-[#44474e] text-sm mb-8">Instant QR and Item Code recognition.</p>
 
               <div className="space-y-4">
                 <input 
@@ -224,7 +263,7 @@ function VerificationContent() {
                 <div className="grid grid-cols-2 gap-4">
                   <button onClick={() => setShowScanner(true)} className="bg-[#f0f4f9] text-[#041e49] py-3.5 rounded-xl font-bold text-sm flex items-center justify-center gap-2 hover:bg-[#d3e3fd] transition-colors cursor-pointer">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
-                    Scan QR
+                    Scan QR / Text
                   </button>
                   <button onClick={() => fileInputRef.current?.click()} className="bg-[#f0f4f9] text-[#041e49] py-3.5 rounded-xl font-bold text-sm flex items-center justify-center gap-2 hover:bg-[#d3e3fd] transition-colors cursor-pointer">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
@@ -232,7 +271,7 @@ function VerificationContent() {
                   </button>
                   <input type="file" ref={fileInputRef} onChange={handleImageUpload} accept="image/*" className="hidden" />
                 </div>
-                <p className="text-[10px] text-[#74777f] font-medium mt-2">Upload supports both QR codes and physical CAS text labels.</p>
+                <p className="text-[10px] text-[#74777f] font-medium mt-2">Scanner reads both QR codes and physical CAS text labels.</p>
               </div>
             </div>
           </div>
@@ -245,19 +284,19 @@ function VerificationContent() {
               <button onClick={() => setShowScanner(false)} className="p-2 hover:bg-[#f0f4f9] rounded-full transition-colors cursor-pointer">
                 <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#44474e" strokeWidth="2"><path d="M19 12H5m7 7l-7-7 7-7"/></svg>
               </button>
-              <h2 className="text-lg font-medium">Scan Item Code</h2>
+              <h2 className="text-lg font-medium">Smart Scanner</h2>
               <div className="w-10"></div>
             </div>
             <div className="flex-1 flex flex-col items-center justify-center p-6 bg-[#f0f4f9]">
               <div className="w-full max-w-sm bg-white p-2 rounded-[40px] shadow-sm border border-[#d3e3fd]">
                 <div className="relative aspect-square overflow-hidden rounded-[32px] bg-black">
                   <div id="reader" className="w-full h-full"></div>
-                  <div className="absolute inset-0 border-[40px] border-black/40 pointer-events-none z-10"></div>
+                  <div className="absolute inset-0 border-[35px] border-black/40 pointer-events-none z-10"></div>
                   <div className="absolute top-0 left-0 w-full h-1 bg-white/60 shadow-[0_0_15px_rgba(255,255,255,0.8)] animate-laser z-20"></div>
                 </div>
               </div>
-              <p className="mt-8 text-[#44474e] text-sm text-center bg-white/50 px-6 py-2 rounded-full font-medium">Point at QR code or item label</p>
-              <button onClick={() => setShowScanner(false)} className="mt-6 px-8 py-3 bg-white text-[#0080ff] border border-[#0080ff] rounded-full text-sm font-bold shadow-sm hover:bg-[#0080ff] hover:text-white transition-all">
+              <p className="mt-8 text-[#44474e] text-sm text-center bg-white/50 px-6 py-2 rounded-full font-medium">Align QR code or Text Label in the frame</p>
+              <button onClick={() => setShowScanner(false)} className="mt-6 px-8 py-3 bg-white text-[#0080ff] border border-[#0080ff] rounded-full text-sm font-bold shadow-sm hover:bg-[#0080ff] hover:text-white transition-all cursor-pointer">
                 Close
               </button>
             </div>
