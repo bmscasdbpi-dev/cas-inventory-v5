@@ -19,10 +19,12 @@ function VerificationContent() {
   const [showScanner, setShowScanner] = useState<boolean>(false);
   const [isParsingImage, setIsParsingImage] = useState<boolean>(false);
   const [ocrStatus, setOcrStatus] = useState<string>("");
+  const [showCancel, setShowCancel] = useState<boolean>(false);
   
   const fileInputRef = useRef<HTMLInputElement>(null);
   const scannerRef = useRef<Html5Qrcode | null>(null);
   const liveOcrIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const cancelTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   // --- Logic: Audio Success Beep (High Pitch) ---
   const playSuccessSound = () => {
@@ -32,38 +34,61 @@ function VerificationContent() {
       const gainNode = audioCtx.createGain();
 
       oscillator.type = "sine";
-      oscillator.frequency.setValueAtTime(880, audioCtx.currentTime); // High pitch A5 note
-      gainNode.gain.setValueAtTime(0.2, audioCtx.currentTime); // Volume control
+      oscillator.frequency.setValueAtTime(880, audioCtx.currentTime); 
+      gainNode.gain.setValueAtTime(0.2, audioCtx.currentTime); 
       
       oscillator.connect(gainNode);
       gainNode.connect(audioCtx.destination);
 
       oscillator.start();
-      oscillator.stop(audioCtx.currentTime + 0.15); // Short sharp beep
+      oscillator.stop(audioCtx.currentTime + 0.15); 
     } catch (e) {
       console.error("Audio beep failed:", e);
     }
   };
 
+  // --- Logic: Reset States (For Cancel/Back) ---
+  const resetVerification = () => {
+    setSelectedItem(null);
+    setSearchCode("");
+    setLoading(false);
+    setIsParsingImage(false);
+    setShowCancel(false);
+    setOcrStatus("");
+    if (cancelTimerRef.current) clearTimeout(cancelTimerRef.current);
+    router.push('/', { scroll: true });
+  };
+
+  // --- Watcher: Show Cancel Button after 5s ---
+  useEffect(() => {
+    if (loading || isParsingImage) {
+      cancelTimerRef.current = setTimeout(() => {
+        setShowCancel(true);
+      }, 5000);
+    } else {
+      setShowCancel(false);
+      if (cancelTimerRef.current) clearTimeout(cancelTimerRef.current);
+    }
+    return () => {
+      if (cancelTimerRef.current) clearTimeout(cancelTimerRef.current);
+    };
+  }, [loading, isParsingImage]);
+
   // --- Logic: Extract code from QR or Text ---
   const extractItemCode = (text: string) => {
-    // 1. Check if it's a URL with a query param
     if (text.includes("?c=")) {
       try {
         const urlParts = text.split("?c=");
         if (urlParts[1]) return urlParts[1].split("&")[0].trim().toUpperCase();
       } catch (e) { console.error("URL Parse error", e); }
     }
-
-    // 2. OCR/Regex Match for CAS-XX-XXXX format
     const regex = /CAS-[A-Z0-9]{2}-[A-Z0-9]{4}/i;
     const match = text.match(regex);
     if (match) return match[0].toUpperCase();
-
     return text.trim().toUpperCase();
   };
 
-  // --- Logic: Live Background OCR (for Instant Text Reading) ---
+  // --- Logic: Live Background OCR ---
   const runLiveOCR = async () => {
     const videoElement = document.querySelector("#reader video") as HTMLVideoElement;
     if (!videoElement || videoElement.paused || videoElement.ended) return;
@@ -74,24 +99,19 @@ function VerificationContent() {
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    // Apply high contrast filter to help Tesseract read small text
     ctx.filter = "contrast(1.4) grayscale(1)";
     ctx.drawImage(videoElement, 0, 0, canvas.width, canvas.height);
     
     try {
       const { data: { text } } = await Tesseract.recognize(canvas, 'eng');
       const foundCode = extractItemCode(text);
-      
-      // If a code is found and matches our format CAS-XX-XXXX
       if (foundCode && foundCode.startsWith("CAS-") && foundCode.length >= 11) {
-        playSuccessSound(); // Play Sound
+        playSuccessSound(); 
         setSearchCode(foundCode);
         handleSearch(foundCode);
         setShowScanner(false);
       }
-    } catch (e) {
-      // Ignore OCR errors in background loop
-    }
+    } catch (e) {}
   };
 
   // --- Logic: Browser Back Button ---
@@ -111,14 +131,13 @@ function VerificationContent() {
     return () => window.removeEventListener("popstate", handlePopState);
   }, []);
 
-  // --- Initial Check for Direct Links ---
   useEffect(() => {
     if (itemCodeFromUrl && !selectedItem) {
       handleSearch(itemCodeFromUrl);
     }
   }, [itemCodeFromUrl]);
 
-  // --- Logic: Camera Scanner (QR + Live OCR Loop) ---
+  // --- Logic: Camera Scanner ---
   useEffect(() => {
     const startCamera = async () => {
       if (showScanner) {
@@ -129,10 +148,9 @@ function VerificationContent() {
           await html5QrCode.start(
             { facingMode: "environment" },
             {
-              fps: 30, // Higher FPS for "instant" feel
+              fps: 30,
               qrbox: { width: 280, height: 280 },
               aspectRatio: 1.0,
-              // Force high resolution to see small codes/text
               videoConstraints: {
                 width: { min: 1280, ideal: 1920 },
                 height: { min: 720, ideal: 1080 },
@@ -140,7 +158,7 @@ function VerificationContent() {
               }
             },
             (text) => {
-              playSuccessSound(); // Play Sound
+              playSuccessSound();
               const code = extractItemCode(text);
               setSearchCode(code);
               handleSearch(code);
@@ -148,18 +166,13 @@ function VerificationContent() {
             },
             () => {}
           );
-
-          // Start the background OCR process every 1.5 seconds
           liveOcrIntervalRef.current = setInterval(runLiveOCR, 1500);
-
         } catch (err) {
           console.error("Scanner failed to start:", err);
         }
       }
     };
-
     startCamera();
-
     return () => {
       if (liveOcrIntervalRef.current) clearInterval(liveOcrIntervalRef.current);
       if (scannerRef.current && scannerRef.current.isScanning) {
@@ -170,29 +183,26 @@ function VerificationContent() {
     };
   }, [showScanner]);
 
-  // --- Logic: OCR from Image Upload ---
+  // --- Logic: Image Upload Scan ---
   const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-
     setIsParsingImage(true);
     setOcrStatus("Processing...");
-
     try {
       const html5QrCode = new Html5Qrcode("hidden-reader");
       try {
         const text = await html5QrCode.scanFile(file, true);
         const code = extractItemCode(text);
-        playSuccessSound(); // Play Sound
+        playSuccessSound();
         setSearchCode(code);
         handleSearch(code);
       } catch (qrErr) {
         setOcrStatus("Reading Text...");
         const { data: { text } } = await Tesseract.recognize(file, 'eng');
         const code = extractItemCode(text);
-        
         if (code && code.includes("CAS-")) {
-          playSuccessSound(); // Play Sound
+          playSuccessSound();
           setSearchCode(code);
           handleSearch(code);
         } else {
@@ -213,7 +223,6 @@ function VerificationContent() {
     const code = codeToSearch || searchCode;
     if (!code) return;
     setLoading(true);
-    
     const cleanCode = code.trim().toUpperCase();
     try {
         const item = await getItemByCode(cleanCode);
@@ -226,7 +235,6 @@ function VerificationContent() {
           setIsInvalidModalOpen(true);
         }
     } catch (error) {
-        console.error("Search error:", error);
         setIsInvalidModalOpen(true);
     } finally {
         setLoading(false);
@@ -259,7 +267,6 @@ function VerificationContent() {
             <div className="w-full max-w-md text-center">
               <h1 className="text-2xl font-bold mb-2 text-[#1a1c1e]">CAS Equipment Verification</h1>
               <p className="text-[#44474e] text-sm mb-8">Instant QR and Item Code recognition.</p>
-
               <div className="space-y-4">
                 <input 
                     value={searchCode}
@@ -268,7 +275,6 @@ function VerificationContent() {
                     placeholder="Enter item code (e.g. CAS-01-0001)" 
                     className="w-full bg-white border border-[#74777f] p-4 rounded-xl outline-none text-base focus:border-[#005fb7] focus:border-2 transition-all text-center font-bold uppercase focus:placeholder:text-transparent"
                 />
-                
                 <button 
                   onClick={() => handleSearch()}
                   disabled={loading || !searchCode || isParsingImage}
@@ -278,13 +284,11 @@ function VerificationContent() {
                     <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
                   ) : "Verify Item"}
                 </button>
-
                 <div className="flex items-center gap-4 py-4">
                   <div className="h-px bg-[#e0e2ec] flex-1"></div>
                   <span className="text-xs font-bold text-[#74777f]">or</span>
                   <div className="h-px bg-[#e0e2ec] flex-1"></div>
                 </div>
-
                 <div className="grid grid-cols-2 gap-4">
                   <button onClick={() => setShowScanner(true)} className="bg-[#f0f4f9] text-[#041e49] py-3.5 rounded-xl font-bold text-sm flex items-center justify-center gap-2 hover:bg-[#d3e3fd] transition-colors cursor-pointer">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
@@ -296,7 +300,6 @@ function VerificationContent() {
                   </button>
                   <input type="file" ref={fileInputRef} onChange={handleImageUpload} accept="image/*" className="hidden" />
                 </div>
-                <p className="text-[10px] text-[#74777f] font-medium mt-2">Scanner reads both QR codes and physical CAS text labels.</p>
               </div>
             </div>
           </div>
@@ -309,7 +312,7 @@ function VerificationContent() {
               <button onClick={() => setShowScanner(false)} className="p-2 hover:bg-[#f0f4f9] rounded-full transition-colors cursor-pointer">
                 <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#44474e" strokeWidth="2"><path d="M19 12H5m7 7l-7-7 7-7"/></svg>
               </button>
-              <h2 className="text-lg font-medium">Smart Scanner</h2>
+              <h2 className="text-lg font-medium">Scan Item Code</h2>
               <div className="w-10"></div>
             </div>
             <div className="flex-1 flex flex-col items-center justify-center p-6 bg-[#f0f4f9]">
@@ -320,7 +323,7 @@ function VerificationContent() {
                   <div className="absolute top-0 left-0 w-full h-1 bg-white/60 shadow-[0_0_15px_rgba(255,255,255,0.8)] animate-laser z-20"></div>
                 </div>
               </div>
-              <p className="mt-8 text-[#44474e] text-sm text-center bg-white/50 px-6 py-2 rounded-full font-medium">Align QR code or Text Label in the frame</p>
+              <p className="mt-8 text-[#44474e] text-sm text-center bg-white/50 px-6 py-2 rounded-full font-medium">Align QR code or Item Code in the frame</p>
               <button onClick={() => setShowScanner(false)} className="mt-6 px-8 py-3 bg-white text-[#0080ff] border border-[#0080ff] rounded-full text-sm font-bold shadow-sm hover:bg-[#0080ff] hover:text-white transition-all cursor-pointer">
                 Close
               </button>
@@ -333,7 +336,7 @@ function VerificationContent() {
           <div className="animate-in fade-in slide-in-from-bottom-4 duration-700">
             <div className="flex items-center mb-8">
               <button 
-                onClick={() => { setSelectedItem(null); setSearchCode(""); router.push('?', {scroll:false}); }}
+                onClick={resetVerification}
                 className="flex items-center gap-2 text-[#005fb7] font-bold text-sm hover:bg-[#d3e3fd]/40 px-4 py-2 rounded-full transition-all cursor-pointer group"
               >
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M19 12H5m7 7l-7-7 7-7"/></svg>
@@ -378,7 +381,7 @@ function VerificationContent() {
 
                   <div className="mt-12 pt-6 border-t border-[#e0e2ec] space-y-4">
                     <p className="text-[11px] text-[#74777f] italic leading-snug">
-                      This item is verified and property of Creative Arts Section at Don Bosco Press, Inc.
+                      Verified property of Creative Arts Section at Don Bosco Press, Inc.
                     </p>
                     <button 
                       onClick={() => window.location.href = 'mailto:cas.dbpi@gmail.com'}
@@ -424,11 +427,21 @@ function VerificationContent() {
 
       {/* --- Global Loading/OCR Modal --- */}
       {(loading || isParsingImage) && (
-        <div className="fixed inset-0 bg-white/80 backdrop-blur-md z-[300] flex flex-col items-center justify-center animate-in fade-in duration-300">
+        <div className="fixed inset-0 bg-white/80 backdrop-blur-md z-[300] flex flex-col items-center justify-center animate-in fade-in duration-300 p-6">
            <div className="w-12 h-12 border-4 border-[#d3e3fd] border-t-[#005fb7] rounded-full animate-spin mb-4"></div>
-           <p className="text-[#005fb7] font-bold text-sm tracking-wide uppercase">
+           <p className="text-[#005fb7] font-bold text-sm tracking-wide uppercase mb-8">
             {isParsingImage ? (ocrStatus || "Reading Label...") : "Verifying..."}
            </p>
+           
+           {/* CANCEL BUTTON: Shows after 5 seconds of loading/parsing */}
+           {showCancel && (
+             <button 
+               onClick={resetVerification}
+               className="px-6 py-2.5 bg-white border border-[#ba1a1a] text-[#ba1a1a] rounded-full text-xs font-bold hover:bg-[#ba1a1a] hover:text-white transition-all animate-in slide-in-from-bottom-2 duration-500 cursor-pointer shadow-sm"
+             >
+               Cancel Verification
+             </button>
+           )}
         </div>
       )}
 
