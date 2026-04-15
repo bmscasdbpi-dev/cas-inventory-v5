@@ -20,25 +20,62 @@ function VerificationContent() {
   const [isParsingImage, setIsParsingImage] = useState<boolean>(false);
   const [ocrStatus, setOcrStatus] = useState<string>("");
   
+  // New States for Scan Intelligence
+  const [scannerFeedback, setScannerFeedback] = useState<"ready" | "blurred" | "reading">("ready");
+
   const fileInputRef = useRef<HTMLInputElement>(null);
   const scannerRef = useRef<Html5Qrcode | null>(null);
   const liveOcrIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
+  // --- Utility: Play Beep Sound ---
+  const playSuccessBeep = () => {
+    try {
+      const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+      const oscillator = audioCtx.createOscillator();
+      const gainNode = audioCtx.createGain();
+
+      oscillator.connect(gainNode);
+      gainNode.connect(audioCtx.destination);
+
+      oscillator.type = "sine";
+      oscillator.frequency.setValueAtTime(880, audioCtx.currentTime); // High pitch A5
+      gainNode.gain.setValueAtTime(0, audioCtx.currentTime);
+      gainNode.gain.linearRampToValueAtTime(0.2, audioCtx.currentTime + 0.05);
+      gainNode.gain.linearRampToValueAtTime(0, audioCtx.currentTime + 0.15);
+
+      oscillator.start();
+      oscillator.stop(audioCtx.currentTime + 0.2);
+    } catch (e) {
+      console.warn("Audio beep failed", e);
+    }
+  };
+
+  // --- Utility: Check Image Sharpness (Blur Detection) ---
+  const checkIsBlurred = (ctx: CanvasRenderingContext2D, width: number, height: number) => {
+    const imageData = ctx.getImageData(0, 0, width, height);
+    const data = imageData.data;
+    let score = 0;
+    for (let i = 0; i < data.length; i += 4) {
+      const avg = (data[i] + data[i + 1] + data[i + 2]) / 3;
+      // Simple variance check
+      score += avg;
+    }
+    // Note: In a production environment, a Laplacian variance check is ideal.
+    // For this implementation, we use the OCR feedback loop as the primary blur indicator.
+    return false; 
+  };
+
   // --- Logic: Extract code from QR or Text ---
   const extractItemCode = (text: string) => {
-    // 1. Check if it's a URL with a query param
     if (text.includes("?c=")) {
       try {
         const urlParts = text.split("?c=");
         if (urlParts[1]) return urlParts[1].split("&")[0].trim().toUpperCase();
       } catch (e) { console.error("URL Parse error", e); }
     }
-
-    // 2. OCR/Regex Match for CAS-XX-XXXX format
     const regex = /CAS-[A-Z0-9]{2}-[A-Z0-9]{4}/i;
     const match = text.match(regex);
     if (match) return match[0].toUpperCase();
-
     return text.trim().toUpperCase();
   };
 
@@ -53,22 +90,30 @@ function VerificationContent() {
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    // Apply high contrast filter to help Tesseract read small text
     ctx.filter = "contrast(1.4) grayscale(1)";
     ctx.drawImage(videoElement, 0, 0, canvas.width, canvas.height);
     
+    setScannerFeedback("reading");
+
     try {
-      const { data: { text } } = await Tesseract.recognize(canvas, 'eng');
-      const foundCode = extractItemCode(text);
+      const { data: { text, confidence } } = await Tesseract.recognize(canvas, 'eng');
       
-      // If a code is found and matches our format CAS-XX-XXXX
+      // Real-time Blur Detection via OCR Confidence
+      if (confidence < 40) {
+        setScannerFeedback("blurred");
+      } else {
+        setScannerFeedback("ready");
+      }
+
+      const foundCode = extractItemCode(text);
       if (foundCode && foundCode.startsWith("CAS-") && foundCode.length >= 11) {
+        playSuccessBeep();
         setSearchCode(foundCode);
         handleSearch(foundCode);
         setShowScanner(false);
       }
     } catch (e) {
-      // Ignore OCR errors in background loop
+      setScannerFeedback("ready");
     }
   };
 
@@ -89,7 +134,6 @@ function VerificationContent() {
     return () => window.removeEventListener("popstate", handlePopState);
   }, []);
 
-  // --- Initial Check for Direct Links ---
   useEffect(() => {
     if (itemCodeFromUrl && !selectedItem) {
       handleSearch(itemCodeFromUrl);
@@ -107,10 +151,9 @@ function VerificationContent() {
           await html5QrCode.start(
             { facingMode: "environment" },
             {
-              fps: 30, // Higher FPS for "instant" feel
+              fps: 30,
               qrbox: { width: 280, height: 280 },
               aspectRatio: 1.0,
-              // Force high resolution to see small codes/text
               videoConstraints: {
                 width: { min: 1280, ideal: 1920 },
                 height: { min: 720, ideal: 1080 },
@@ -119,6 +162,7 @@ function VerificationContent() {
             },
             (text) => {
               const code = extractItemCode(text);
+              playSuccessBeep();
               setSearchCode(code);
               handleSearch(code);
               setShowScanner(false);
@@ -126,7 +170,6 @@ function VerificationContent() {
             () => {}
           );
 
-          // Start the background OCR process every 1.5 seconds
           liveOcrIntervalRef.current = setInterval(runLiveOCR, 1500);
 
         } catch (err) {
@@ -147,7 +190,6 @@ function VerificationContent() {
     };
   }, [showScanner]);
 
-  // --- Logic: OCR from Image Upload ---
   const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -160,6 +202,7 @@ function VerificationContent() {
       try {
         const text = await html5QrCode.scanFile(file, true);
         const code = extractItemCode(text);
+        playSuccessBeep();
         setSearchCode(code);
         handleSearch(code);
       } catch (qrErr) {
@@ -168,6 +211,7 @@ function VerificationContent() {
         const code = extractItemCode(text);
         
         if (code && code.includes("CAS-")) {
+          playSuccessBeep();
           setSearchCode(code);
           handleSearch(code);
         } else {
@@ -183,7 +227,6 @@ function VerificationContent() {
     }
   };
 
-  // --- Logic: Database Search ---
   async function handleSearch(codeToSearch?: string) {
     const code = codeToSearch || searchCode;
     if (!code) return;
@@ -228,7 +271,6 @@ function VerificationContent() {
       <div className="max-w-6xl mx-auto">
         <div id="hidden-reader" className="hidden"></div>
 
-        {/* --- View 1: Search Screen --- */}
         {!selectedItem && !showScanner && (
           <div className="flex flex-col items-center justify-center min-h-[85vh] animate-in fade-in duration-700">
             <div className="w-full max-w-md text-center">
@@ -288,10 +330,22 @@ function VerificationContent() {
               <div className="w-10"></div>
             </div>
             <div className="flex-1 flex flex-col items-center justify-center p-6 bg-[#f0f4f9]">
+              {/* Intelligent Feedback Indicator */}
+              <div className={`mb-4 px-4 py-1.5 rounded-full text-xs font-bold transition-all duration-300 flex items-center gap-2 ${
+                scannerFeedback === "blurred" ? "bg-[#ba1a1a] text-white animate-pulse" : 
+                scannerFeedback === "reading" ? "bg-[#0080ff] text-white" : "bg-[#c4eed0] text-[#072711]"
+              }`}>
+                <div className={`w-2 h-2 rounded-full ${scannerFeedback === "reading" ? "animate-ping bg-white" : "bg-current"}`}></div>
+                {scannerFeedback === "blurred" ? "CAMERA BLURRED - HOLD STEADY" : 
+                 scannerFeedback === "reading" ? "ANALYZING LABEL..." : "READY TO SCAN"}
+              </div>
+
               <div className="w-full max-w-sm bg-white p-2 rounded-[40px] shadow-sm border border-[#d3e3fd]">
                 <div className="relative aspect-square overflow-hidden rounded-[32px] bg-black">
                   <div id="reader" className="w-full h-full"></div>
-                  <div className="absolute inset-0 border-[35px] border-black/40 pointer-events-none z-10"></div>
+                  <div className={`absolute inset-0 border-[35px] pointer-events-none z-10 transition-colors duration-300 ${
+                    scannerFeedback === "blurred" ? "border-[#ba1a1a]/40" : "border-black/40"
+                  }`}></div>
                   <div className="absolute top-0 left-0 w-full h-1 bg-white/60 shadow-[0_0_15px_rgba(255,255,255,0.8)] animate-laser z-20"></div>
                 </div>
               </div>
