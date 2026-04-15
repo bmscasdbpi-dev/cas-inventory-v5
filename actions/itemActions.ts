@@ -1,10 +1,13 @@
 "use server"
 
 import { db } from "../db/index"; 
-import { items } from "../db/schema";
+import { items, foundReports } from "../db/schema"; 
 import { eq } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 
+/**
+ * ADD ITEM
+ */
 export async function addItem(formData: any) {
   try {
     // 1. PRINT THE DATA TO YOUR VS CODE TERMINAL TO DEBUG
@@ -37,6 +40,9 @@ export async function addItem(formData: any) {
   }
 }
 
+/**
+ * UPDATE ITEM
+ */
 export async function updateItem(id: number, formData: any) {
   try {
     await db.update(items)
@@ -67,6 +73,9 @@ export async function updateItem(id: number, formData: any) {
   }
 }
 
+/**
+ * DELETE ITEM
+ */
 export async function deleteItem(id: number) {
   try {
     await db.delete(items).where(eq(items.id, id));
@@ -78,6 +87,9 @@ export async function deleteItem(id: number) {
   }
 }
 
+/**
+ * GET ITEM BY CODE (For Scanner)
+ */
 export async function getItemByCode(code: string) {
   try {
     const result = await db
@@ -90,5 +102,34 @@ export async function getItemByCode(code: string) {
   } catch (error) {
     console.error("Database Search Error:", error);
     return null;
+  }
+}
+
+/**
+ * SUBMIT FOUND ITEM REPORT
+ * Stores report in the found_reports table in TursoDB
+ */
+export async function submitFoundReport(formData: FormData) {
+  try {
+    const referenceId = `REP-${Date.now()}`;
+
+    await db.insert(foundReports).values({
+      reportReferenceId: referenceId,
+      reportDate: formData.get("date") as string,
+      // Change 'itemCode' to 'itemCodes' to match your schema
+      itemCodes: formData.get("itemCodes") as string, 
+      // Change 'itemName' to 'itemNames' to match your schema
+      itemNames: formData.get("itemNames") as string, 
+      description: formData.get("description") as string,
+      location: formData.get("location") as string,
+      reporterName: formData.get("foundBy") as string,
+      contactNumber: formData.get("contactNumber") as string,
+      photoUrl: "Bulk report photo", // Or your actual URL logic
+    });
+
+    return { success: true, referenceId };
+  } catch (error) {
+    console.error(error);
+    return { success: false };
   }
 }

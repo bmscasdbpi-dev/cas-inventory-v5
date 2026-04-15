@@ -39,3 +39,15 @@ export const usageLogs = sqliteTable("borrower_records", {
   requestStatus: text("request_status").default("Preparing"),
 });
 
+export const foundReports = sqliteTable("found_reports", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  reportReferenceId: text("report_reference_id").notNull(),
+  reportDate: text("report_date").notNull(), // This replaces report.date
+  itemCodes: text("item_codes").notNull(),
+  itemNames: text("item_names").notNull(),
+  description: text("description").notNull(),
+  location: text("location").notNull(),
+  reporterName: text("reporter_name").notNull(), // This replaces report.foundBy
+  contactNumber: text("contact_number").notNull(),
+  photoUrl: text("photo_url"),
+});
