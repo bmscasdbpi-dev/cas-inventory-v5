@@ -1,17 +1,88 @@
 "use server"
 
 import { db } from "../db/index"; 
-import { usageLogs, items, borrowingSessions } from "../db/schema";
+import * as schema from "../db/schema";
 import { eq, desc, inArray } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
+import { unstable_noStore as noStore } from "next/cache"; // Bypass Next.js static cache
 
 /**
- * 1. Kunin ang lahat ng items
+ * HELPER: Select the correct table based on category string
+ */
+const getTable = (category: string) => {
+  const mapping: Record<string, any> = {
+    "Cameras & Accessories": schema.cameras,
+    "Lights & Accessories": schema.lights,
+    "Sound & Accessories": schema.sound,
+    "Computers & Peripherals": schema.computers,
+    "Office Appliance": schema.office,
+    "Others": schema.others,
+  };
+  return mapping[category] || schema.others;
+};
+
+/**
+ * 1. Kunin ang lahat ng items mula sa LAHAT ng category
+ * UPDATED: Fetches relational maintenance logs from Turso & unpacks legacy records
  */
 export async function getAllItems() {
+  noStore(); // Prevent caching
   try {
-    const data = await db.select().from(items).orderBy(desc(items.id));
-    return { success: true, data };
+    const categories = [
+      "Cameras & Accessories",
+      "Lights & Accessories",
+      "Sound & Accessories",
+      "Computers & Peripherals",
+      "Office Appliance",
+      "Others"
+    ];
+
+    // 1. Fetch all items across all category tables
+    const allData = await Promise.all(categories.map(async (cat) => {
+      const targetTable = getTable(cat);
+      const data = await db.select().from(targetTable).orderBy(desc(targetTable.id));
+      
+      // Inject category for later mapping
+      return data.map((item: any) => ({
+        ...item,
+        category: cat,
+        itemCategory: cat
+      }));
+    }));
+
+    // Flatten the results into a single array
+    const flattenedItems = allData.flat();
+
+    // 2. Fetch all relational maintenance logs from the new table at once
+    const allMaintenanceLogs = await db.select().from(schema.maintenanceLogs);
+
+    // 3. Map logs and legacy data to their respective items
+    const itemsWithLogs = flattenedItems.map(item => {
+      let parsedLegacy = item.maintenanceRecords;
+      
+      // Handle legacy JSON parsing for old notes
+      try {
+        const parsed = JSON.parse(item.maintenanceRecords || "{}");
+        if (parsed.legacy !== undefined) {
+          parsedLegacy = parsed.legacy;
+        }
+      } catch(e) {
+        // If it fails, it means it's old pure text legacy data, which is completely fine!
+      }
+
+      // Filter logs matching both ID and Category to prevent overlaps across tables
+      const matchingLogs = allMaintenanceLogs.filter(
+        log => log.itemId === item.id && log.itemCategory === item.category
+      );
+
+      return { 
+        ...item, 
+        maintenanceRecords: parsedLegacy,
+        maintenanceLogs: matchingLogs // Attach the real TursoDB relational records here
+      };
+    });
+
+    return { success: true, data: itemsWithLogs };
   } catch (error) {
     console.error("Fetch Items Error:", error);
     return { success: false, data: [] };
@@ -20,6 +91,7 @@ export async function getAllItems() {
 
 /**
  * 2. Pag-log ng paggamit (Equipment Issuance)
+ * UPDATED: Bulletproof payload handling
  */
 export async function useEquipment(formData: {
   borrowedBy: string;
@@ -29,11 +101,15 @@ export async function useEquipment(formData: {
   purposeDate: string;
   claimDate: string;
   returnExpectedDate: string;
-  itemIds: number[];
+  items?: { id: number; category: string }[]; // New structure
+  itemIds?: number[]; // Fallback for old structure
+  category?: string; // Fallback for old structure
 }) {
+  noStore();
   try {
     return await db.transaction(async (tx) => {
-      const [session] = await tx.insert(borrowingSessions).values({
+      // Create the main borrowing session
+      const [session] = await tx.insert(schema.borrowingSessions).values({
         requestorName: formData.borrowedBy,
         companyName: formData.companyName,
         departmentName: formData.departmentName,
@@ -41,20 +117,30 @@ export async function useEquipment(formData: {
         purposeDate: formData.purposeDate,
         pickupDate: formData.claimDate,
         expectedReturnDate: formData.returnExpectedDate,
-      }).returning({ id: borrowingSessions.id });
+      }).returning({ id: schema.borrowingSessions.id });
 
       if (!session) throw new Error("Failed to create borrowing session.");
 
-      for (const id of formData.itemIds) {
-        await tx.insert(usageLogs).values({
+      // Safely handle both new and old payload formats so it NEVER crashes
+      const itemsToProcess = formData.items 
+        ? formData.items 
+        : (formData.itemIds || []).map(id => ({ id, category: formData.category || "Others" }));
+
+      for (const item of itemsToProcess) {
+        const targetTable = getTable(item.category);
+
+        // Insert log record with category identifier
+        await tx.insert(schema.usageLogs).values({
           sessionId: session.id,
-          itemId: id,
+          itemId: item.id,
+          itemCategory: item.category, 
           requestStatus: "Preparing",
         });
 
-        await tx.update(items)
+        // Update availability in the specific category table
+        await tx.update(targetTable)
           .set({ availabilityStatus: "Unavailable" })
-          .where(eq(items.id, id));
+          .where(eq(targetTable.id, item.id));
       }
 
       revalidatePath("/dashboard");
@@ -70,22 +156,23 @@ export async function useEquipment(formData: {
 /**
  * 3. Pag-return ng kagamitan (Batch)
  */
-export async function returnEquipmentBatch(logIds: number[], itemIds: number[], manualReturnDate: string) {
+export async function returnEquipmentBatch(logIds: number[], itemIds: number[], category: string, manualReturnDate: string) {
   try {
     return await db.transaction(async (tx) => {
       if (logIds.length > 0) {
-        await tx.update(usageLogs)
+        await tx.update(schema.usageLogs)
           .set({ 
             dateReturned: manualReturnDate, 
             requestStatus: "Returned" 
           })
-          .where(inArray(usageLogs.id, logIds));
+          .where(inArray(schema.usageLogs.id, logIds));
       }
 
       if (itemIds.length > 0) {
-        await tx.update(items)
+        const targetTable = getTable(category);
+        await tx.update(targetTable)
           .set({ availabilityStatus: "Available" })
-          .where(inArray(items.id, itemIds));
+          .where(inArray(targetTable.id, itemIds));
       }
 
       revalidatePath("/dashboard/logbook");
@@ -98,38 +185,76 @@ export async function returnEquipmentBatch(logIds: number[], itemIds: number[], 
   }
 }
 
+
 /**
- * 4. Kunin ang lahat ng logs (Joins 3 tables)
+ * 4. Kunin ang lahat ng logs
+ * Multi-table join logic with Legacy Data Support & Error Logging
  */
 export async function getAllLogs() {
+  noStore(); // Prevent Next.js from caching empty databases
   try {
     const data = await db
       .select({
-        id: usageLogs.id,
-        sessionId: usageLogs.sessionId,
-        itemId: usageLogs.itemId,
-        requestorName: borrowingSessions.requestorName,
-        companyName: borrowingSessions.companyName,
-        departmentName: borrowingSessions.departmentName,
-        purposeTitle: borrowingSessions.purposeTitle,
-        itemCode: items.itemCode,
-        itemName: items.itemName,
-        serialNumber: items.serialNumber, 
-        dateRequested: borrowingSessions.dateRequested,
-        pickupDate: borrowingSessions.pickupDate,
-        expectedReturnDate: borrowingSessions.expectedReturnDate,
-        dateReturned: usageLogs.dateReturned,
-        requestStatus: usageLogs.requestStatus,
+        id: schema.usageLogs.id,
+        sessionId: schema.usageLogs.sessionId,
+        itemId: schema.usageLogs.itemId,
+        itemCategory: schema.usageLogs.itemCategory,
+        requestorName: schema.borrowingSessions.requestorName,
+        companyName: schema.borrowingSessions.companyName,
+        departmentName: schema.borrowingSessions.departmentName,
+        purposeTitle: schema.borrowingSessions.purposeTitle,
+        dateRequested: schema.borrowingSessions.dateRequested,
+        pickupDate: schema.borrowingSessions.pickupDate,
+        expectedReturnDate: schema.borrowingSessions.expectedReturnDate,
+        dateReturned: schema.usageLogs.dateReturned,
+        requestStatus: schema.usageLogs.requestStatus,
       })
-      .from(usageLogs)
-      .leftJoin(borrowingSessions, eq(usageLogs.sessionId, borrowingSessions.id))
-      .leftJoin(items, eq(usageLogs.itemId, items.id))
-      .orderBy(desc(usageLogs.id));
+      .from(schema.usageLogs)
+      .leftJoin(schema.borrowingSessions, eq(schema.usageLogs.sessionId, schema.borrowingSessions.id))
+      .orderBy(desc(schema.usageLogs.id));
 
-    return { success: true, data };
-  } catch (error) {
-    console.error("Fetch Logs Error:", error);
-    return { success: false, data: [] };
+    const enrichedData = await Promise.all(data.map(async (log: any) => {
+      // If old record has no category, skip the DB lookup to prevent crashing
+      if (!log.itemCategory) {
+        return {
+          ...log,
+          itemCode: "LEGACY",
+          itemName: "Old Legacy Record",
+          serialNumber: "N/A"
+        };
+      }
+
+      if (!log.itemId) return log;
+      
+      try {
+        const targetTable = getTable(log.itemCategory);
+        const itemDetails = await db.select({
+          itemCode: targetTable.itemCode,
+          itemName: targetTable.itemName,
+          serialNumber: targetTable.serialNumber
+        })
+        .from(targetTable)
+        .where(eq(targetTable.id, log.itemId))
+        .limit(1);
+
+        return {
+          ...log,
+          itemCode: itemDetails[0]?.itemCode || "N/A",
+          itemName: itemDetails[0]?.itemName || "Item Missing",
+          serialNumber: itemDetails[0]?.serialNumber || "N/A"
+        };
+      } catch (itemErr) {
+        // If a specific category query fails, return a fallback instead of crashing everything
+        console.error(`Failed to fetch item details for log ${log.id}:`, itemErr);
+        return { ...log, itemCode: "ERROR", itemName: "Query Error", serialNumber: "N/A" };
+      }
+    }));
+
+    return { success: true, data: enrichedData };
+  } catch (error: any) {
+    // THIS WILL TELL US IF TURSO IS REJECTING THE QUERY
+    console.error("!!! CRITICAL: Fetch Logs Error !!!", error);
+    return { success: false, data: [], error: error.message };
   }
 }
 
@@ -143,9 +268,9 @@ export async function updateSessionBatch(sessionId: number, updates: {
   purposeTitle?: string;
 }) {
   try {
-    await db.update(borrowingSessions)
+    await db.update(schema.borrowingSessions)
       .set(updates)
-      .where(eq(borrowingSessions.id, sessionId));
+      .where(eq(schema.borrowingSessions.id, sessionId));
 
     revalidatePath("/dashboard/logbook");
     return { success: true };
@@ -160,9 +285,9 @@ export async function updateSessionBatch(sessionId: number, updates: {
  */
 export async function updateBatchStatus(logIds: number[], newStatus: string) {
   try {
-    await db.update(usageLogs)
+    await db.update(schema.usageLogs)
       .set({ requestStatus: newStatus })
-      .where(inArray(usageLogs.id, logIds));
+      .where(inArray(schema.usageLogs.id, logIds));
 
     revalidatePath("/dashboard/logbook");
     return { success: true };
@@ -175,18 +300,19 @@ export async function updateBatchStatus(logIds: number[], newStatus: string) {
 /**
  * 7. Update Single Log Entry
  */
-export async function updateSingleLogEntry(logId: number, itemId: number, updates: any) {
+export async function updateSingleLogEntry(logId: number, itemId: number, category: string, updates: any) {
   try {
     return await db.transaction(async (tx) => {
-      await tx.update(usageLogs)
+      await tx.update(schema.usageLogs)
         .set(updates)
-        .where(eq(usageLogs.id, logId));
+        .where(eq(schema.usageLogs.id, logId));
 
       if (updates.requestStatus) {
+        const targetTable = getTable(category);
         const newAvailability = updates.requestStatus === "Returned" ? "Available" : "Unavailable";
-        await tx.update(items)
+        await tx.update(targetTable)
           .set({ availabilityStatus: newAvailability })
-          .where(eq(items.id, itemId));
+          .where(eq(targetTable.id, itemId));
       }
 
       revalidatePath("/dashboard/logbook");
@@ -202,11 +328,12 @@ export async function updateSingleLogEntry(logId: number, itemId: number, update
 /**
  * 8. Update Item Details
  */
-export async function updateItemDetails(itemId: number, updates: { itemName?: string, serialNumber?: string }) {
+export async function updateItemDetails(itemId: number, category: string, updates: { itemName?: string, serialNumber?: string }) {
   try {
-    await db.update(items)
+    const targetTable = getTable(category);
+    await db.update(targetTable)
       .set(updates)
-      .where(eq(items.id, itemId));
+      .where(eq(targetTable.id, itemId));
 
     revalidatePath("/dashboard/logbook");
     revalidatePath("/dashboard");
@@ -218,13 +345,13 @@ export async function updateItemDetails(itemId: number, updates: { itemName?: st
 }
 
 /**
- * 9. Update Log Batch (FIX FOR THE "onBlur" ERROR)
+ * 9. Update Log Batch
  */
 export async function updateLogBatch(logIds: number[], updates: any) {
   try {
-    await db.update(usageLogs)
+    await db.update(schema.usageLogs)
       .set(updates)
-      .where(inArray(usageLogs.id, logIds));
+      .where(inArray(schema.usageLogs.id, logIds));
 
     revalidatePath("/dashboard/logbook");
     return { success: true };

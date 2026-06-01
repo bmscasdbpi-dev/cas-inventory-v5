@@ -8,6 +8,34 @@
       "when": 1773105100399,
       "tag": "0000_nervous_annihilus",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1779952319198,
+      "tag": "0001_steep_rockslide",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1779952629554,
+      "tag": "0002_majestic_skrulls",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1780279761675,
+      "tag": "0003_jazzy_ironclad",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1780280667291,
+      "tag": "0004_large_skullbuster",
+      "breakpoints": true
     }
   ]
 }

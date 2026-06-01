@@ -1,23 +1,135 @@
 import { sqliteTable, text, integer, numeric } from "drizzle-orm/sqlite-core";
 import { sql } from "drizzle-orm";
 
-export const items = sqliteTable("items", {
+/**
+ * 1. CAMERAS & ACCESSORIES
+ */
+export const cameras = sqliteTable("cameras", {
   id: integer("id").primaryKey({ autoIncrement: true }),
-  itemCode: text("item_code").unique().notNull(),
-  oldItemCode: text("old_item_code"),
+itemCode: text("item_code").notNull(),
   itemName: text("item_name").notNull(),
-  itemType: text("item_type"), 
-  category: text("category"), 
+  itemType: text("item_type"),
+  category: text("category"),
   serialNumber: text("serial_number"),
   locationStored: text("location_stored"),
+  inclusions: text("inclusions"),
+  deviceStatus: text("device_status").default("Working"), 
   availabilityStatus: text("availability_status").default("Available"),
-  deviceStatus: text("deviceStatus").default("Working"),
   remarks: text("remarks"),
+  oldItemCode: text("old_item_code"),
   maintenanceRecords: text("maintenance_records"),
   gdriveLink: text("gdrive_link"),
   createdAt: text("created_at").default(sql`CURRENT_TIMESTAMP`),
 });
 
+/**
+ * 2. LIGHTS & ACCESSORIES
+ */
+export const lights = sqliteTable("lights", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+itemCode: text("item_code").notNull(),
+  itemName: text("item_name").notNull(),          
+  itemType: text("item_type"),                    
+  category: text("category"),
+  serialNumber: text("serial_number"),            
+  locationStored: text("location_stored"),        
+  inclusions: text("inclusions"),
+  deviceStatus: text("device_status").default("Working"), 
+  availabilityStatus: text("availability_status").default("Available"), 
+  remarks: text("remarks"),                        
+  oldItemCode: text("old_item_code"),             
+  maintenanceRecords: text("maintenance_records"),
+  gdriveLink: text("gdrive_link"),
+  createdAt: text("created_at").default(sql`CURRENT_TIMESTAMP`),
+});
+
+/**
+ * 3. SOUND & ACCESSORIES
+ */
+export const sound = sqliteTable("sound", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+itemCode: text("item_code").notNull(),
+  itemName: text("item_name").notNull(),
+  itemType: text("item_type"),
+  category: text("category"),
+  serialNumber: text("serial_number"),
+  locationStored: text("location_stored"),
+  inclusions: text("inclusions"),
+  deviceStatus: text("device_status").default("Working"),
+  availabilityStatus: text("availability_status").default("Available"),
+  remarks: text("remarks"),
+  oldItemCode: text("old_item_code"),
+  maintenanceRecords: text("maintenance_records"),
+  gdriveLink: text("gdrive_link"),
+  createdAt: text("created_at").default(sql`CURRENT_TIMESTAMP`),
+});
+
+/**
+ * 4. COMPUTER & PERIPHERALS
+ */
+export const computers = sqliteTable("computers", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+itemCode: text("item_code").notNull(),
+  itemName: text("item_name").notNull(),
+  itemType: text("item_type"),
+  category: text("category"),
+  serialNumber: text("serial_number"),
+  locationStored: text("location_stored"),
+  inclusions: text("inclusions"),
+  deviceStatus: text("device_status").default("Working"),
+  availabilityStatus: text("availability_status").default("Available"),
+  remarks: text("remarks"),
+  oldItemCode: text("old_item_code"),
+  maintenanceRecords: text("maintenance_records"),
+  gdriveLink: text("gdrive_link"),
+  createdAt: text("created_at").default(sql`CURRENT_TIMESTAMP`),
+});
+
+/**
+ * 5. OFFICE APPLIANCE
+ */
+export const office = sqliteTable("office", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+itemCode: text("item_code").notNull(),
+  itemName: text("item_name").notNull(),
+  itemType: text("item_type"),
+  category: text("category"),
+  serialNumber: text("serial_number"),
+  locationStored: text("location_stored"),
+  inclusions: text("inclusions"),
+  deviceStatus: text("device_status").default("Working"),
+  availabilityStatus: text("availability_status").default("Available"),
+  remarks: text("remarks"),
+  oldItemCode: text("old_item_code"),
+  maintenanceRecords: text("maintenance_records"),
+  gdriveLink: text("gdrive_link"),
+  createdAt: text("created_at").default(sql`CURRENT_TIMESTAMP`),
+});
+
+/**
+ * 6. OTHERS
+ */
+export const others = sqliteTable("others", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+itemCode: text("item_code").notNull(),
+  itemName: text("item_name").notNull(),
+  itemType: text("item_type"),
+  category: text("category"),
+  serialNumber: text("serial_number"),
+  locationStored: text("location_stored"),
+  inclusions: text("inclusions"),
+  deviceStatus: text("device_status").default("Working"),
+  availabilityStatus: text("availability_status").default("Available"),
+  remarks: text("remarks"),
+  oldItemCode: text("old_item_code"),
+  maintenanceRecords: text("maintenance_records"),
+  gdriveLink: text("gdrive_link"),
+  createdAt: text("created_at").default(sql`CURRENT_TIMESTAMP`),
+});
+
+/**
+ * BORROWING SESSIONS
+ */
 export const borrowingSessions = sqliteTable("borrowing_sessions", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   requestorName: text("requestor_name").notNull(),
@@ -30,24 +142,28 @@ export const borrowingSessions = sqliteTable("borrowing_sessions", {
   dateRequested: numeric("date_requested").default(sql`CURRENT_TIMESTAMP`),
 });
 
-// Siguraduhin din ang usageLogs (borrower_records)
+/**
+ * USAGE LOGS / BORROWER RECORDS
+ */
 export const usageLogs = sqliteTable("borrower_records", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   sessionId: integer("session_id").references(() => borrowingSessions.id), 
-  itemId: integer("item_id").references(() => items.id),
+  itemId: integer("item_id"), 
+  itemCategory: text("item_category"), 
   dateReturned: numeric("date_returned"),
   requestStatus: text("request_status").default("Preparing"),
 });
 
-export const foundReports = sqliteTable("found_reports", {
+/**
+ * MAINTENANCE LOGS (NEW)
+ */
+export const maintenanceLogs = sqliteTable("maintenance_logs", {
   id: integer("id").primaryKey({ autoIncrement: true }),
-  reportReferenceId: text("report_reference_id").notNull(),
-  reportDate: text("report_date").notNull(), // This replaces report.date
-  itemCodes: text("item_codes").notNull(),
-  itemNames: text("item_names").notNull(),
-  description: text("description").notNull(),
-  location: text("location").notNull(),
-  reporterName: text("reporter_name").notNull(), // This replaces report.foundBy
-  contactNumber: text("contact_number").notNull(),
-  photoUrl: text("photo_url"),
+  itemId: integer("item_id").notNull(),
+  itemCategory: text("item_category").notNull(),
+  date: text("date"),
+  activity: text("activity"),
+  status: text("status").default("Ongoing"),
+  center: text("center"),
+  createdAt: text("created_at").default(sql`CURRENT_TIMESTAMP`),
 });
